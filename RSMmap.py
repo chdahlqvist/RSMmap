@@ -344,40 +344,64 @@ def RSM(mcube,psf,inner_radius,nmod,cubesize,distri='Gaussian',distrifit=True,in
                
        else:
            if distri=='Gaussian':
-               popt,pcov = curve_fit(gaus,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
-               mean[c]=popt[0]
-               var[c]=popt[1]
-
-               fiterr[c]=sum(abs(gaus(bin_mid,*popt)-hist))                
+               try:
+                   popt,pcov = curve_fit(gaus,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
+                   mean[c]=popt[0]
+                   var[c]=popt[1]
+                   fiterr[c]=sum(abs(gaus(bin_mid,*popt)-hist))
+               except RuntimeError:
+                   fiterr[c]=sum(abs(gaus(bin_mid,mean[c],var[c])-hist)) 
            elif distri=='Laplacian':
-               popt,pcov = curve_fit(lap,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
-               mean[c]=popt[0]
-               var[c]=popt[1] 
-
-               fiterr[c]=sum(abs(lap(bin_mid,*popt)-hist))
+               try:
+                   popt,pcov = curve_fit(lap,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
+                   mean[c]=popt[0]
+                   var[c]=popt[1] 
+                   fiterr[c]=sum(abs(lap(bin_mid,*popt)-hist))
+               except RuntimeError:
+                   fiterr[c]=sum(abs(lap(bin_mid,mean[c],var[c])-hist))
            elif distri=='mix':
-               popt,pcov = curve_fit(mix,bin_mid,hist,p0=[mean[c],var[c],0.5],bounds=[(-2*abs(mean[c]),0,0),(2*abs(mean[c]),4*var[c],1)])
-               mean[c]=popt[0]
-               var[c]=popt[1] 
-               mixval[c]=popt[2]
-               fiterr[c]=sum(abs(mix(bin_mid,*popt)-hist))
-
+               try:
+                   popt,pcov = curve_fit(mix,bin_mid,hist,p0=[mean[c],var[c],0.5],bounds=[(-2*abs(mean[c]),0,0),(2*abs(mean[c]),4*var[c],1)])
+                   mean[c]=popt[0]
+                   var[c]=popt[1] 
+                   mixval[c]=popt[2]
+                   fiterr[c]=sum(abs(mix(bin_mid,*popt)-hist))
+               except RuntimeError:
+                   fixmix = lambda binm, mv: mix(binm,mean[c],var[c],mv)
+                   popt,pcov = curve_fit(fixmix,bin_mid,hist,p0=[0.5],bounds=[(0),(1)])
+                   mixval[c]=popt[0]
+                   fiterr[c]=sum(abs(mix(bin_mid,mean[c],var[c],*popt)-hist))
+                   
            elif distri=='auto':
-               poptg,pcovg = curve_fit(gaus,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
-               poptl,pcovl = curve_fit(lap,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
-               fiterrg=sum(abs(gaus(bin_mid,*poptg)-hist))
-               fiterrl=sum(abs(lap(bin_mid,*poptl)-hist))
+               
+                try:
 
-               if fiterrg>fiterrl:
-                   distrim[c]='Laplacian'
-                   mean[c]=poptl[0]
-                   var[c]=poptl[1]
-                   fiterr[c]=fiterrl
-               else:
-                   distrim[c]='Gaussian'
-                   mean[c]=poptg[0]
-                   var[c]=poptg[1] 
-                   fiterr[c]=fiterrg
+                   poptg,pcovg = curve_fit(gaus,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
+                   poptl,pcovl = curve_fit(lap,bin_mid,hist,p0=[mean[c],var[c]],bounds=[(-2*abs(mean[c]),0),(2*abs(mean[c]),4*var[c])])
+                   fiterrg=sum(abs(gaus(bin_mid,*poptg)-hist))
+                   fiterrl=sum(abs(lap(bin_mid,*poptl)-hist))
+
+                   if fiterrg>fiterrl:
+                       distrim[c]='Laplacian'
+                       mean[c]=poptl[0]
+                       var[c]=poptl[1]
+                       fiterr[c]=fiterrl
+                   else:
+                       distrim[c]='Gaussian'
+                       mean[c]=poptg[0]
+                       var[c]=poptg[1] 
+                       fiterr[c]=fiterrg
+                       
+                except RuntimeError:
+                    fiterrg=sum(abs(gaus(bin_mid,mean[c],var[c])-hist))
+                    fiterrl=sum(abs(lap(bin_mid,mean[c],var[c])-hist))
+          
+                    if fiterrg>fiterrl:
+                        distrim[c]='Laplacian'
+                        fiterr[c]=fiterrl
+                    else:
+                        distrim[c]='Gaussian'
+                        fiterr[c]=fiterrg
 
       
        startp+=cubeseq[c]
