@@ -93,7 +93,7 @@ def RSM(mcube,psf,inner_radius,nmod,cubesize,distri='Gaussian',distrifit=True,in
     Returns
     -------
     likres : 
-        Total log-likelihood used to select the optimal delta
+        Summed log-likelihood used to select the optimal delta
     delta:
         Optimal delta providing when multiplied by the residual noise variance,
         the strength of the planetary signal in the Regime Swicting Model (2d numpy array).The 
