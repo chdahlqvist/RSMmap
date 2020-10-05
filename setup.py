@@ -41,7 +41,7 @@ with open(resource('README.md')) as readme_file:
 
 setup(
     name='PyRSM',
-    version=0.1,
+    version=0.1.0,
     description='Package for exoplanet detection via RSM map',
     long_description=README,
     license='MIT',
