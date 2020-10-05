@@ -1,6 +1,6 @@
 # PyRSM 
 
-**PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and potentialy ADI+IFS) sequences (see Dahlqvist et al. A&A, 2020, 633, A95).
+**PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and potentialy ADI+IFS) sequences (see Dahlqvist et al., A&A, 2020, 633, A95).
 The RSM map algorithm relies on one or several **PSF subtraction techniques** to process one or multiple **ADI sequences** before computing a final probability map.
 
 The package contains a class PyRSM regrouping four main functions. The *add_cube* and *add_model* functions allow to 
