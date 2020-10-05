@@ -4,7 +4,7 @@ import os
 from hci_plot import plot_frames
 import sys
 sys.path.append('../../')   # append the path to PyRSM
-import PyRSM
+from PyRSM import *
 
 
 os.chdir('/Users/..')
