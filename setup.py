@@ -47,7 +47,7 @@ setup(
     license='MIT',
     author='Carl-Henrik Dahlqvist',
     author_email='ch.dahlqvist@gmail.com',
-    url='https://github.com/vortex-exoplanet/VIP',
+    url='https://github.com/chdahlqvist/RSMmap/archive/0.1.0.tar.gz',
     cmdclass={'install': InstallReqs},
     packages=['PyRSM'],
     install_requires=reqs,
