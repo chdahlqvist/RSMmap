@@ -24,24 +24,30 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
 ## PyRSM class
 
 * fwhm: int
+
     Full width at half maximum for the instrument PSF
 * minradius : int
+
     Radius of center of the first annulus considered in the RSM probability
     map estimation. The radius should be larger than half 
     the value of the 'crop' parameter 
 * maxradius : int
+
     Radius of the center of the last annulus considered in the RSM probability
     map estimation. The radius should be smaller or equal to half the
     size of the image minus half the value of the 'crop' parameter 
 * interval: list of float or int, optional
+
     List of values taken by the delta parameter defining, when mutliplied by the 
     standard deviation, the strengh of the planetary signal in the Regime Switching model.
     Default is 1. The different delta paramaters are tested and the optimal value
     is selected via maximum likelmihood.
 * pxscale : float
+
     Value of the pixel in arcsec/px. Only used for printing plots when
     showplot=True in like_esti. 
 * ncore : int, optional
+
     Number of processes for parallel computing. By default ('ncore=1') 
     the algorithm works in single-process mode.  
 
@@ -49,10 +55,13 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
 ## add_cube
 
 * cube : numpy ndarray, 3d
+
     Input cube (ADI sequences), Dim 1 = temporal axis, Dim 2-3 = spatial axis
 * angs : numpy ndarray, 1d
+
     Parallactic angles for each frame of the ADI sequences. 
 * psf : numpy ndarray 2d
+
     2d array with the normalized PSF template, with an odd shape.
     The PSF image must be centered wrt to the array! Therefore, it is
     recommended to run the function "normalize_psf" to generate a 
@@ -61,6 +70,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
 ## add_model
 
 * model : str
+
     Selected ADI-based post-processing techniques used to 
     generate the cubes of residuals feeding the Regime Switching model.
     'APCA' for annular PCA, NMF for Non-Negative Matrix Factorization, LLSG
@@ -69,21 +79,28 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     Image Projection. There exists a foward model version of KLIP and LOCI called 
     respectively 'FM KLIP' and 'FM LOCI'.
 * delta_rot : int, optional
+
     Factor for tunning the parallactic angle threshold, expressed in FWHM.
     Default is 0.5 (excludes 0.5xFHWM on each side of the considered frame).
 * asize : int, optional
+
     Width in pixels of each annulus. Default is 5. 
 * n_segments : int, optional
+
     The number of segments in each annulus. Default is 1, working annulus-wise.
 * ncomp : int, optional
+
     Number of components used for the low-rank approximation of the 
     speckle field with 'APCA', 'KLIP', 'NMF' and 'FM KLIP'. Default is 20.
-* rank : int, optional        
+* rank : int, optional  
+
     Expected rank of the L component of the 'LLSG' decomposition. Default is 5.
 * tolerance: float, optional
+
     Tolerance level for the approximation of the speckle field via a linear 
     combination of the reference images in the LOCI algorithm. Default is 1e-2.
 * flux: boolean, optionnal
+
     If true the flux parameter within the regime switching framework is estimated
     via a gaussian maximum likelihood by comparing the set of observations
     and the PSF or the forward model PSF in the case of 'FM KLIP' and 'FM LOCI'.
@@ -92,6 +109,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     of the total likelihood of the regime switching model for the selected annulus.
     Default is False.
 * distri: str, optional
+
     Probability distribution used for the estimation of the likelihood 
     of both regimes (planetary or speckle) in the Regime Switching framework.
     Default is 'Gaussian' but three other possibilities exist, 'Laplacian',
@@ -107,6 +125,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     the empirical distribution by fitting a mix parameter providing the ratio
     of 'Laplacian' distribution compared to the 'Gaussian' one.
 * var: str, optional
+
     Model used for the residual noise variance estimation. Six different approaches
     are proposed: 'Full', 'Annulus', 'Segment with mask', 'Time', 'Time with mask',
     'Background patch'. While all six can be used when flux=False, only the last
@@ -136,14 +155,17 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     the selected pixel, considering every frame in the derotated cube of residuals 
     except for the selected frame)
 * distrifit: bool, optional
+
     If true, the estimation of the mean and variance of the selected distribution
     is done via an best fit on the empirical distribution. If False, basic 
     empirical estimation of the mean and variance using the set of observations 
     contained in the considered annulus, without taking into account the selected
     distribution.
 * crop_size: int, optional
+
     Part of the PSF tempalte considered in the estimation of the RSM map
 * crop_range: int, optional
+
     Range of crop sizes considered in the estimation of the RSM map, starting with crop_size
     and increasing the crop size incrementally by 2 pixels up to a crop size of 
     crop_size + 2 x (crop_range-1).  
@@ -152,39 +174,47 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
 ## like_esti
 
 * showplot: bool, optional
+
     If True, provides the plots of the final residual frames for the selected 
     ADI-based post-processing techniques along with the final RSM map. Default is False.
 * fulloutput: bool, optional
+
     If True, provides the selected distribution, the fitness erros and the mixval 
     (for distri='mix') for every annulus in respectively obj.distrisel, obj.fiterr
     and obj.mixval (the length of these lists are equall to maxradius - minradius, the
     size of the matrix for each annulus depends on the approach selected for the variance
     estimation, see var in add_model)
 * verbose : bool, optional
+
     If True prints intermediate info. Default is True.
     
 ## prob_esti
 
 * modthencube: bool, optional
+
     Parameter defining if the concatenated cube feeding the RSM model is created
     considering first the model or the different cubes. If 'modtocube=False',
     the function will select the first cube then test all models on it and move 
     to the next one. If 'modtocube=True', the model will select one model and apply
     it to every cubes before moving to the next model. Default is True.
 * ns: float , optional
+
      Number of regime switches. Default is one regime switch per annulus but 
      smaller values may be used to reduce the impact of noise or disk structures
      on the final RSM probablity map.
 * sel_crop: list of int or None, optional
+
     Selected crop sizes from proposed crop_range (selected crop size = crop_size + 2 x (sel_crop-1)).
     A specific sel_crop should be provided for each mode. Default is None which is equivalent to
     selected crop size = crop_size
 * estimator: str, optional
+
     Approach used for the probability map estimation either a 'Forward' model
     (approach used in the original RSM map algorithm) which consider only the 
     past observations to compute the current probability or 'Forward-Backward' model
     which relies on both past and future observations to compute the current probability
 * colmode:str, optional
+
     Method used to generate the final probability map from the three-dimensionnal cube
     of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
     the 'median' or the 'max' value of the probabilities along the time axis. Default is 'median'.
