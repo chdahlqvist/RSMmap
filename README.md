@@ -1,4 +1,5 @@
-#PyRSM 
+# PyRSM 
+
 **PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and potentialy ADI+IFS) sequences (see Dahlqvist et al. A&A, 2020, 633, A95).
 The RSM map algorithm relies on one or several **PSF subtraction techniques** to process one or multiple **ADI sequences** before computing a final probability map.
 
@@ -12,9 +13,9 @@ cube of likelihoods containing for each pixel and each frame the likelihood of b
 These likelihoods cubes are then used by the *probmap_esti* function to provide the final probability map based on the RSM 
 framework.
 
-A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided in the folder example to test the PyRSM class. A list of parameters for the PyRSM class and for the four functions are given below:
+A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/Example). A list of parameters for the PyRSM class and for its four functions are given below:
 
-##PyRSM class
+## PyRSM class
 
 * fwhm: int
     Full width at half maximum for the instrument PSF
@@ -39,7 +40,7 @@ A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided 
     the algorithm works in single-process mode.  
 
 
-##add_cube
+## add_cube
 
 * cube : numpy ndarray, 3d
     Input cube (ADI sequences), Dim 1 = temporal axis, Dim 2-3 = spatial axis
@@ -51,7 +52,7 @@ A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided 
     recommended to run the function "normalize_psf" to generate a 
     centered and flux-normalized PSF template.
     
-##add_model
+## add_model
 
 * model : str
     Selected ADI-based post-processing techniques used to 
@@ -142,7 +143,7 @@ A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided 
     crop_size + 2 x (crop_range-1).  
     
     
-##like_esti
+## like_esti
 
 * showplot: bool, optional
     If True, provides the plots of the final residual frames for the selected 
@@ -156,7 +157,7 @@ A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided 
 * verbose : bool, optional
     If True prints intermediate info. Default is True.
     
-##prob_esti
+## prob_esti
 
 * modthencube: bool, optional
     Parameter defining if the concatenated cube feeding the RSM model is created
