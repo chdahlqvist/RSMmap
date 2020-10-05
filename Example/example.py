@@ -2,8 +2,6 @@
 import vip_hci as vip
 import os
 from hci_plot import plot_frames
-import sys
-sys.path.append('../../')   # append the path to PyRSM
 from PyRSM import *
 
 
