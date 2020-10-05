@@ -13,7 +13,13 @@ cube of likelihoods containing for each pixel and each frame the likelihood of b
 These likelihoods cubes are then used by the *probmap_esti* function to provide the final probability map based on the RSM 
 framework.
 
-A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example). A list of parameters for the PyRSM class and for its four functions are given below:
+## Setup and tutorial
+
+The package may be installed via pip install using the command:
+
+>pip install https://github.com/chdahlqvist/RSMmap/archive/0.1.1.tar.gz
+
+A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example). A list of parameters for the PyRSM class and for its four functions are given below.
 
 ## PyRSM class
 
