@@ -1,6 +1,6 @@
 """
 Regime Switching Model (RSM) detection map. The package contains The PyRSM class
-containing four main functions. The add_cube and add_model functions allow to 
+containing four main methods. The add_cube and add_model functions allow to 
 consider several cubes and models to generate the cube of residuals used to compute 
 the RSM map. The cube should be provided by the same instrument or rescaled to a unique
 pixel size. The class can be used with ADI and ADI+IFS. In the case of IFS data 
