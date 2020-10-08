@@ -3,14 +3,7 @@
 **PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and potentialy ADI+IFS) sequences (see Dahlqvist et al., A&A, 2020, 633, A95).
 The RSM map algorithm relies on one or several **PSF subtraction techniques** to process one or multiple **ADI sequences** before computing a final probability map.
 
-The package contains a class PyRSM regrouping four main functions. The *add_cube* and *add_model* functions allow to 
-consider several ADI sequences and models (PSF subtraction techniques) to generate the cube of residuals used to compute 
-the RSM map. The cube should be provided by the same instrument or rescaled to a unique pixel size. The class can be used 
-with ADI and ADI+IFS. In the case of IFS data the data should be rescaled and cropped for each wavelength (using for example the vip cube_rescaling_wavelengths function) and included separately in 
-the model via the *add_cube* function. A specific PSF should be provided for each cube. Five different models and two forward 
-model versions are available (APCA, NMF, LLSG, KLIP, LOCI, FM KLIP and FM LOCI). Each model can be parametrized separately. The function *like_esti* allows the estimation of a 
-cube of likelihoods containing for each pixel and each frame the likelihood of being in the planetary and speckle regime.
-These likelihoods cubes are then used by the *probmap_esti* function to provide the final probability map based on the RSM 
+The package contains a class PyRSM regrouping four main methods. The *add_cube* and *add_model* methods allow to consider several ADI sequences and models (PSF subtraction techniques) to generate the cube of residuals used to compute the RSM map. The cube should be provided by the same instrument or rescaled to a unique pixel size. The class can be used with ADI and ADI+IFS. In the case of IFS data the data should be rescaled and cropped for each wavelength (using for example the vip cube_rescaling_wavelengths function) and included separately in the model via the *add_cube* method. A specific PSF should be provided for each cube. Five different models and two forward model versions are available (APCA, NMF, LLSG, KLIP, LOCI, FM KLIP and FM LOCI). Each model can be parametrized separately. The method *like_esti* allows the estimation of a cube of likelihoods containing for each pixel and each frame the likelihood of being in the planetary and speckle regime. These likelihoods cubes are then used by the *probmap_esti* method to provide the final probability map based on the RSM 
 framework.
 
 ## Setup and tutorial
@@ -19,7 +12,7 @@ The package may be installed via pip install using the command:
 
 >pip install https://github.com/chdahlqvist/RSMmap/archive/0.1.1.tar.gz
 
-A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example). A list of parameters for the PyRSM class and for its four functions are given below.
+A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example). A list of parameters for the PyRSM class and for its four methods are given below.
 
 ## PyRSM class
 
