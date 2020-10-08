@@ -21,14 +21,13 @@ import numpy.linalg as la
 import scipy as sp
 from scipy.optimize import curve_fit
 from skimage.draw import circle 
-import multiprocessing as mp
-import ctypes as ct
 import vip_hci as vip
 from vip_hci.var import get_annulus_segments,frame_center
 from vip_hci.preproc import frame_crop,cube_derotate,cube_crop_frames, check_pa_vector,cube_collapse
 from vip_hci.metrics import cube_inject_companions
 from vip_hci.preproc.derotation import _define_annuli,_find_indices_adi
 from hciplot import plot_frames 
+from vip_hci.conf.utils_conf import pool_map, iterable
 
 
 class PyRSM:
@@ -250,7 +249,7 @@ class PyRSM:
             and increasing the crop size incrementally by 2 pixels up to a crop size of 
             crop_size + 2 x (crop_range-1).  
         """
-        if crop_size+2*(crop_range-1)>=2*round(self.fwhm)+1:
+        if crop_size+2*(crop_range-1)>2*round(self.fwhm)+1:
             raise ValueError("Maximum cropsize should be lower or equal to two FWHM, please change accordingly either 'crop_size' or 'crop_range'")
             
         if any(var in myvar for myvar in ['Full','Annulus','Segment with mask','Time','Time with mask','Background patch'])==False:
@@ -283,24 +282,24 @@ class PyRSM:
 
         for i in range(len(self.cube)):
             
-            self.psf_fm[i].append([])
+            self.psf_fm[i].append(list([None]*(self.maxradius+1)))
             self.like_fin[i].append([])
             self.distrisel[i].append([])
             self.mixval[i].append([])
             self.fiterr[i].append([])
-        
-    def likelihood(self,cuben,modn,mcube,ann_center,verbose=True,fulloutput=False):
-         
+            
 
         
+    def likelihood(self,ann_center,cuben,modn,mcube,verbose=True,fulloutput=False):
+
+        ann_center=self.maxradius-ann_center
         if self.flux[modn]:
             range_int=1
         else:
             range_int=len(self.interval)
 
         n,y,x=mcube.shape 
-        liketemp = np.frombuffer(probcube.get_obj())
-        likemap=liketemp.reshape((n+1,x,y,range_int,2,self.crop_range[modn]))
+        likemap=np.zeros((n+1,x,y,range_int,2,self.crop_range[modn]))
 
 
         def likfcn(cuben,modn,mean,var,mixval,mcube,ann_center,distrim,evals=None,evecs_matrix=None, KL_basis_matrix=None,refs_mean_sub_matrix=None,sci_mean_sub_matrix=None,resicube_klip=None,probcube=0,var_f=None, ind_ref_list=None,coef_list=None):
@@ -315,7 +314,7 @@ class PyRSM:
                 
             if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
                 
-                if len(self.psf_fm[cuben][modn])!=0:
+                if self.psf_fm[cuben][modn][ann_center] is not None:
                     psf_formod=True
                 else:
                     
@@ -366,7 +365,7 @@ class PyRSM:
                             psf_fm_out[i,:,:,:]=psfm_temp
                             
                     else:
-                            psfm_temp=self.psf_fm[cuben][modn][ann_center-self.minradius][i,:,:,:]
+                            psfm_temp=self.psf_fm[cuben][modn][ann_center][i,:,:,:]
                             psf_fm_out[i,:,:,:]=psfm_temp
                 #PSF forward model computation for LOCI
                             
@@ -399,7 +398,7 @@ class PyRSM:
                             psfm_temp=cube_crop_frames(cube_der_fc,2*round(self.fwhm)+1,xy=(poscentx,poscenty),verbose=False)
                             psf_fm_out[i,:,:,:]=psfm_temp
                     else:
-                            psfm_temp=self.psf_fm[cuben][modn][ann_center-self.minradius][i,:,:,:]
+                            psfm_temp=self.psf_fm[cuben][modn][ann_center][i,:,:,:]
                             psf_fm_out[i,:,:,:]=psfm_temp
                 #Flux parameter estimation via Gaussian maximum likelihood (matched filtering)
                             
@@ -520,14 +519,13 @@ class PyRSM:
                                 probcube[int(cubind),int(indicesy[i]),int(indicesx[i]),int(m),l,v]=cftemp.sum()
 
                     cubind+=1
+                    
 
-            return probcube,psf_fm_out
+            if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
+                return probcube,psf_fm_out
+            else:
+                return probcube
         
-
-
-        if verbose==True:
-            print("Radial distance: "+"{}".format(ann_center)) 
-
 
         #Estimation of the KLIP cube of residuals for the selected annulus
         
@@ -931,17 +929,30 @@ class PyRSM:
                             var_f[a,b,v]=np.var(np.asarray(mcube_sel))
 
         #Estimation of the final probability map
-
-        likemap,psf_fm_out=likfcn(cuben,modn,mean,var,mixval,mcube,ann_center,distrim,evals_matrix,evecs_matrix, KL_basis_matrix,refs_mean_sub_matrix,sci_mean_sub_matrix,resicube_klip,likemap,var_f,ind_ref_list,coef_list)
-
         
+        res=likfcn(cuben,modn,mean,var,mixval,mcube,ann_center,distrim,evals_matrix,evecs_matrix, KL_basis_matrix,refs_mean_sub_matrix,sci_mean_sub_matrix,resicube_klip,likemap,var_f,ind_ref_list,coef_list)
+
+        if verbose==True:
+            
+            print("Radial distance "+"{}".format(ann_center)+" treated") 
+
+
         if fulloutput:
             if self.distri[modn]=='mix':
-                return psf_fm_out,distrim,fiterr,mixval
-            else:   
-                return psf_fm_out,distrim,fiterr
-        elif self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
-            return psf_fm_out
+                if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
+                    return ann_center,res[0],distrim,fiterr,mixval,res[1]
+                else:
+                    return ann_center,res,distrim,fiterr,mixval
+            else:
+                if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
+                    return ann_center,res[0],distrim,fiterr,res[1]
+                else:
+                    return ann_center,res,distrim,fiterr
+        else:   
+             if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI': 
+                 return rann_center,es[0],res[1]
+             else:
+                 return ann_center,res
         
     def lik_esti(self, showplot=False,fulloutput=False,verbose=True):
         
@@ -969,6 +980,7 @@ class PyRSM:
         def init(probi):
             global probcube
             probcube = probi
+        
             
         for i in range(len(self.model)):
             
@@ -1015,32 +1027,29 @@ class PyRSM:
                         frame_fin=np.zeros_like(self.cube[j][0])
                     
                 #Likelihood computation for the different models and cubes
+                print("Likelihoods computation") 
                 
-                probcube = mp.Array(ct.c_double, (residuals_cube_.shape[0]+1)*residuals_cube_.shape[1]*residuals_cube_.shape[2]*len(self.interval)*self.crop_range[i]*2) 
+                like_temp=np.zeros(((residuals_cube_.shape[0]+1),residuals_cube_.shape[1],residuals_cube_.shape[2],len(self.interval),2,self.crop_range[i]))    
 
-                pool = mp.Pool(processes=self.ncore,initializer=init, initargs=(probcube,))
-                results=[]
-    
-                for ann_center in range(self.minradius,self.maxradius):
-        
-                    result = pool.apply_async(self.likelihood, args=(j,i,residuals_cube_,ann_center,verbose,fulloutput))
-                    results.append(result)
-                [result.wait() for result in results]
-
-                pool.close()
+                results=pool_map(self.ncore, self.likelihood,iterable(range(self.maxradius-self.minradius+1)),j,i,residuals_cube_,verbose,fulloutput)
+                 
                 for result in results:
                     if fulloutput:
-                        self.psf_fm[j][i].append(result.get()[0])
-                        self.distrisel[j][i].append(result.get()[1])
-                        self.fiterr[j][i].append(result.get()[2])
+                        like_temp+=np.where(like_temp>0,0,result[1])
+                        self.distrisel[j][i].append(result[2])
+                        self.fiterr[j][i].append(result[3])
                         if self.distri[j][i]=='mix':
-                            self.mixval[j][i].append(result.get()[3])
-                    elif self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
-                        self.psf_fm[j][i].append(result.get())
-     
-                probtemp = np.frombuffer(probcube.get_obj())
-                like_temp=probtemp.reshape(((residuals_cube_.shape[0]+1),residuals_cube_.shape[1],residuals_cube_.shape[2],len(self.interval),2,self.crop_range[i]))
-
+                            self.mixval[j][i].append(result[4])
+                            if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
+                                self.psf_fm[j][i][result[0]]=result[5]
+                        elif self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
+                            self.psf_fm[j][i][result[0]]=result[4]
+                    else:
+                        if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
+                            like_temp+=np.where(like_temp>0,0,result[1])
+                            self.psf_fm[j][i][result[0]]=result[2]
+                        else:
+                            like_temp+=np.where(like_temp>0,0,result[1])
                 
                 like=[]
                 SNR_FMMF=[]
@@ -1061,7 +1070,139 @@ class PyRSM:
                 self.like_fin[j][i]=like
                 
                 
+    def likfcn(self,ann_center,like_cube,estimator,ns):
 
+        from vip_hci.var import frame_center  
+        ann_center=self.maxradius-ann_center
+        def forback(obs,Trpr,prob_ini):
+            
+            #Forward backward model relying on past and future observation to 
+            #compute the probability based on a two-states Markov chain
+    
+            scalefact_fw=np.zeros(obs.shape[1])
+            scalefact_bw=np.zeros(obs.shape[1])
+            prob_fw=np.zeros((2,obs.shape[1]))
+            prob_bw=np.zeros((2,obs.shape[1]))
+            prob_fin=np.zeros((2,obs.shape[1]))
+            prob_pre_fw=0
+            prob_pre_bw=0
+            lik=0
+            #Forward
+            for i in range(obs.shape[1]):
+                if obs[:,i].sum()!=0:
+                    j=obs.shape[1]-1-i
+                    if i==0:
+                        prob_cur_fw=np.dot(np.diag(obs[:,i]),Trpr).dot(prob_ini)
+                        prob_cur_bw=np.dot(Trpr,np.diag(obs[:,j])).dot(prob_ini)
+                    else:
+                        prob_cur_fw=np.dot(np.diag(obs[:,i]),Trpr).dot(prob_pre_fw)
+                        prob_cur_bw=np.dot(Trpr,np.diag(obs[:,j])).dot(prob_pre_bw)
+        
+                    scalefact_fw[i]=prob_cur_fw.sum()
+                    prob_fw[:,i]=prob_cur_fw/scalefact_fw[i]
+                    prob_pre_fw=prob_fw[:,i]
+        
+                    scalefact_bw[j]=prob_cur_bw.sum()
+                    prob_bw[:,j]=prob_cur_bw/scalefact_bw[j]
+                    prob_pre_bw=prob_bw[:,j]
+    
+            scalefact_fw_tot=(scalefact_fw).sum()                
+            scalefact_bw_tot=(scalefact_bw).sum()
+    
+    
+            for k in range(obs.shape[1]):
+                if prob_fw[:,k].sum()==0 or prob_bw[:,k].sum()==0:
+                    prob_fin[:,k]=np.nan
+                else:
+                    prob_fin[:,k]=(prob_fw[:,k]*prob_bw[:,k])/(prob_fw[:,k]*prob_bw[:,k]).sum()
+    
+            lik = scalefact_fw_tot+scalefact_bw_tot
+    
+            return prob_fin, lik
+    
+    
+        def RSM_esti(obs,Trpr,prob_ini):
+            
+            #Original RSM approach involving a forward a two-states Markov chain
+    
+            prob_fin=np.zeros((2,obs.shape[1]))
+            prob_pre=0
+            lik=0
+    
+            for i in range(obs.shape[1]):
+                if obs[:,i].sum()!=0:
+                    if i==0:
+                        cf=obs[:,i]*np.dot(Trpr,prob_ini)
+                    else:
+                        cf=obs[:,i]*np.dot(Trpr,prob_pre)
+        
+                    f=sum(cf)            
+                    lik+=np.log(f)
+                    prob_fin[:,i]=cf/f
+                    prob_pre=prob_fin[:,i]
+                else:
+                    prob_fin[:,i]=np.nan
+    
+            return prob_fin, lik
+    
+        probmap = np.zeros((like_cube.shape[0],like_cube.shape[1],like_cube.shape[2]))
+        ceny, cenx = frame_center(like_cube[0,:,:,0,0])
+        
+        indicesy,indicesx=get_time_series(like_cube[:,:,:,0,0],ann_center)
+
+        npix = len(indicesy)
+        pini=[1-ns/(like_cube.shape[0]*(npix)),1/(like_cube.shape[0]*ns),ns/(like_cube.shape[0]*(npix)),1-1/(like_cube.shape[0]*ns)]
+        prob=np.reshape([pini],(2, 2)) 
+
+        Trpr= prob
+
+        #Initialization of the Regime Switching model
+        #I-prob
+        mA=np.concatenate((np.diag(np.repeat(1,2))-prob,[np.repeat(1,2)]))
+        #sol
+        vE=np.repeat([0,1],[2,1])
+        #mA*a=vE -> mA'mA*a=mA'*vE -> a=mA'/(mA'mA)*vE
+            
+        prob_ini=np.dot(np.dot(np.linalg.inv(np.dot(mA.T,mA)),mA.T),vE)
+
+        cf=np.zeros((2,len(indicesy)*like_cube.shape[0],len(self.interval)))
+        totind=0
+        for i in range(0,len(indicesy)):
+
+            poscenty=indicesy[i]
+            poscentx=indicesx[i]
+                
+            for j in range(0,like_cube.shape[0]):        
+
+                    for m in range(0,len(self.interval)):
+                        
+                        cf[0,totind,m]=like_cube[j,poscenty,poscentx,m,0]
+                        cf[1,totind,m]=like_cube[j,poscenty,poscentx,m,1]
+                    totind+=1
+                    
+        #Computation of the probability cube via the regime switching framework
+        
+        prob_fin=[] 
+        lik_fin=[]
+        for n in range(len(self.interval)):
+            if estimator=='Forward':
+                prob_fin_temp,lik_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
+            elif estimator=='Forward-Backward':
+                prob_fin_temp,lik_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
+
+
+            prob_fin.append(prob_fin_temp)
+            lik_fin.append(lik_fin_temp)
+        
+        cub_id1=0   
+        for i in range(0,len(indicesy)):
+            cub_id2=0
+            for j in range(like_cube.shape[0]):
+                    probmap[cub_id2,indicesy[i],indicesx[i]]=prob_fin[lik_fin.index(max(lik_fin))][1,cub_id1]
+                    cub_id1+=1
+                    cub_id2+=1
+                    
+        return probmap
 
     def probmap_esti(self,modthencube=True,ns=1,sel_crop=None, estimator='Forward',colmode='median'):
         
@@ -1135,137 +1276,16 @@ class PyRSM:
                         else:
                             like_cube=np.append(like_cube,self.like_fin[i][j][int(sel_crop[j])],axis=0) 
                     
-        n,y,x,l_int,r_n =like_cube.shape 
-        probmap = np.zeros((like_cube.shape[0],like_cube.shape[1],like_cube.shape[2]))
-    
-
-        def forback(obs,Trpr,prob_ini):
-            
-            #Forward-backward model relying on past and future observations to 
-            #compute the probability based on a two-states Markov chain
-    
-            scalefact_fw=np.zeros(obs.shape[1])
-            scalefact_bw=np.zeros(obs.shape[1])
-            prob_fw=np.zeros((2,obs.shape[1]))
-            prob_bw=np.zeros((2,obs.shape[1]))
-            prob_fin=np.zeros((2,obs.shape[1]))
-            prob_pre_fw=0
-            prob_pre_bw=0
-            lik=0
-            
-            for i in range(obs.shape[1]):
-                j=obs.shape[1]-1-i
-                if i==0:
-                    prob_cur_fw=np.dot(np.diag(obs[:,i]),Trpr).dot(prob_ini)
-                    prob_cur_bw=np.dot(Trpr,np.diag(obs[:,j])).dot(prob_ini)
-                else:
-                    prob_cur_fw=np.dot(np.diag(obs[:,i]),Trpr).dot(prob_pre_fw)
-                    prob_cur_bw=np.dot(Trpr,np.diag(obs[:,j])).dot(prob_pre_bw)
-    
-                scalefact_fw[i]=prob_cur_fw.sum()
-                prob_fw[:,i]=prob_cur_fw/scalefact_fw[i]
-                prob_pre_fw=prob_fw[:,i]
-    
-                scalefact_bw[j]=prob_cur_bw.sum()
-                prob_bw[:,j]=prob_cur_bw/scalefact_bw[j]
-                prob_pre_bw=prob_bw[:,j]
-    
-            scalefact_fw_tot=(scalefact_fw).sum()                
-            scalefact_bw_tot=(scalefact_bw).sum()
-    
-    
-            for k in range(obs.shape[1]):
-    
-                prob_fin[:,k]=(prob_fw[:,k]*prob_bw[:,k])/(prob_fw[:,k]*prob_bw[:,k]).sum()
-    
-            lik = scalefact_fw_tot+scalefact_bw_tot
-    
-            return prob_fin, lik
-    
-    
-        def RSM_esti(obs,Trpr,prob_ini):
-            
-            #Original RSM approach involving a forward two-states Markov chain
-    
-            prob_fin=np.zeros((2,obs.shape[1]))
-            prob_pre=0
-            lik=0
-    
-            for i in range(obs.shape[1]):
-                if i==0:
-                    cf=obs[:,i]*np.dot(Trpr,prob_ini)
-                else:
-                    cf=obs[:,i]*np.dot(Trpr,prob_pre)
-    
-                f=sum(cf)            
-                lik+=np.log(f)
-                prob_fin[:,i]=cf/f
-                prob_pre=prob_fin[:,i]
-    
-            return prob_fin, lik
-    
-        def likfcn(like_cube,ann_center,ns):
-    
-
-            ceny, cenx = frame_center(like_cube[0,:,:,0,0])
-            
-            indicesy,indicesx=get_time_series(like_cube[:,:,:,0,0],ann_center)
-    
-            npix = len(indicesy)
-            pini=[1-ns/(like_cube.shape[0]*(npix)),1/(like_cube.shape[0]*ns),ns/(like_cube.shape[0]*(npix)),1-1/(like_cube.shape[0]*ns)]
-            prob=np.reshape([pini],(2, 2)) 
-    
-            Trpr= prob
-    
-            #Initialization of the Regime Switching model
-            #I-prob
-            mA=np.concatenate((np.diag(np.repeat(1,2))-prob,[np.repeat(1,2)]))
-            #sol
-            vE=np.repeat([0,1],[2,1])
-            #mA*a=vE -> mA'mA*a=mA'*vE -> a=mA'/(mA'mA)*vE
-                
-            prob_ini=np.dot(np.dot(np.linalg.inv(np.dot(mA.T,mA)),mA.T),vE)
-    
-            cf=np.zeros((2,len(indicesy)*like_cube.shape[0],len(self.interval)))
-            totind=0
-            for i in range(0,len(indicesy)):
-    
-                poscenty=indicesy[i]
-                poscentx=indicesx[i]
-                    
-                for j in range(0,like_cube.shape[0]):        
-    
-                        for m in range(0,len(self.interval)):
-                            
-                            cf[0,totind,m]=like_cube[j,poscenty,poscentx,m,0]
-                            cf[1,totind,m]=like_cube[j,poscenty,poscentx,m,1]
-                        totind+=1
-                        
-            #Computation of the probability cube via the regime switching framework
-            
-            prob_fin=[] 
-            lik_fin=[]
-            for n in range(len(self.interval)):
-                if estimator=='Forward':
-                    prob_fin_temp,lik_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
-                elif estimator=='Forward-Backward':
-                    prob_fin_temp,lik_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
-    
-    
-                prob_fin.append(prob_fin_temp)
-                lik_fin.append(lik_fin_temp)
-            
-            cub_id1=0   
-            for i in range(0,len(indicesy)):
-                cub_id2=0
-                for j in range(like_cube.shape[0]):
-                        probmap[cub_id2,indicesy[i],indicesx[i]]=prob_fin[lik_fin.index(max(lik_fin))][1,cub_id1]
-                        cub_id1+=1
-                        cub_id2+=1
+        print("RSM map computation") 
         
-        for i in range(self.maxradius-self.minradius):
-            ann_center=self.minradius+i
-            likfcn(like_cube,ann_center,ns)
+        n,y,x,l_int,r_n =like_cube.shape 
+        probmap_temp = np.zeros((like_cube.shape[0],like_cube.shape[1],like_cube.shape[2]))
+
+        results=pool_map(self.ncore, self.likfcn,iterable(range(self.maxradius-self.minradius+1)),like_cube,estimator,ns)
+            
+        for result in results:
+            probmap_temp+=np.where(probmap_temp>0,0,result)
+        probmap=probmap_temp           
             
         self.probmap=cube_collapse(probmap, mode=colmode)
         
@@ -1667,5 +1687,4 @@ def _leastsq_patch(ayxyx, angles,cube, nann,metric, dist_threshold,
         return matrix_res,ind_ref_list,coef_list, yy, xx,
     else:
         return matrix_res, yy,xx
-
 
