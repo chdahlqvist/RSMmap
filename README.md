@@ -10,7 +10,7 @@ framework.
 
 The package may be installed via pip install using the command:
 
->pip install https://github.com/chdahlqvist/RSMmap/archive/0.1.1.tar.gz
+>pip install https://github.com/chdahlqvist/RSMmap/archive/0.1.2.tar.gz
 
 A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example). A list of parameters for the PyRSM class and for its four methods are given below.
 
