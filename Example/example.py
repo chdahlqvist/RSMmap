@@ -1,7 +1,7 @@
 
 import vip_hci as vip
 import os
-from hci_plot import plot_frames
+from hciplot import plot_frames
 from PyRSM import *
 
 
@@ -9,7 +9,7 @@ os.chdir('/Users/..')
 
 psfnaco = './naco_betapic_psf.fits'
 cube = './naco_betapic_cube.fits'
-angle = './naco_betapic_pa.fits'
+angle = './naco_betapic_a.fits'
 
 angs = vip.fits.open_fits(angle)
 cube_orig = vip.fits.open_fits(cube)
