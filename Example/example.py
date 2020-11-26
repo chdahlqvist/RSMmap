@@ -9,7 +9,7 @@ os.chdir('/Users/..')
 
 psfnaco = './naco_betapic_psf.fits'
 cube = './naco_betapic_cube.fits'
-angle = './naco_betapic_a.fits'
+angle = './naco_betapic_pa.fits'
 
 angs = vip.fits.open_fits(angle)
 cube_orig = vip.fits.open_fits(cube)
