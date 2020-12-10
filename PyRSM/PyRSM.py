@@ -732,7 +732,7 @@ class PyRSM:
                 poscentx=indices[0][1]
                 poscenty=indices[0][0]
                 
-                arr = np.ndarray.flatten(mcube[:,poscentx,poscenty])
+                arr = np.ndarray.flatten(mcube[:,poscenty,poscentx])
             
                 mean[v],var[v],fiterr[v],mixval[v],distrim[v]=vm_esti(modn,arr,np.var(mcube[:,poscentx,poscenty]),np.mean(mcube[:,poscentx,poscenty]))
                 
@@ -754,13 +754,13 @@ class PyRSM:
             
                 for a in range(n):
            
-                    arr = np.ndarray.flatten(mcube[a,poscentx,poscenty])
+                    arr = np.ndarray.flatten(mcube[a,poscenty,poscentx])
                     
                     mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v]=vm_esti(modn,arr,np.var(mcube[a,poscentx,poscenty]),np.mean(mcube[a,poscentx,poscenty]))
 
                     if self.flux[modn]:
                     
-                        var_f[a,v]=np.var(mcube[a,poscentx,poscenty])
+                        var_f[a,v]=np.var(mcube[a,poscenty,poscentx])
                     
         elif self.var[modn]=='Segment with mask':
             
@@ -816,7 +816,7 @@ class PyRSM:
                             positiony.append(indices[0][0][k])
 
         
-                    arr = np.ndarray.flatten(mcube[:,positionx,positiony])
+                    arr = np.ndarray.flatten(mcube[:,positiony,positionx])
 
                     mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v]=vm_esti(modn,arr,np.var(mcube[:,positionx,positiony]),np.mean(mcube[:,positionx,positiony]))
 
@@ -869,13 +869,13 @@ class PyRSM:
                 
                     for b in range(n):
            
-                        arr = np.ndarray.flatten(mcube[b,positionx,positiony])
+                        arr = np.ndarray.flatten(mcube[b,positiony,positionx])
                     
                         mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube[b,positionx,positiony])),np.mean(np.asarray(mcube[b,positionx,positiony])))
             
                         if self.flux[modn]:
                     
-                            var_f[a,b,v]=np.var(mcube[b,positionx,positiony])
+                            var_f[a,b,v]=np.var(mcube[b,positiony,positionx])
                             
         elif self.var[modn]=='Background patch' :
         
@@ -916,7 +916,7 @@ class PyRSM:
                     #indc=circle(indicesy[j], indicesx[j],3)
                         mask = np.ones(mcube_derot.shape[0],dtype=bool)
                         mask[b]=0
-                        mcube_sel=mcube_derot[:,x0:x1,y0:y1]
+                        mcube_sel=mcube_derot[:,y0:y1,x0:x1]
                         mcube_sel=mcube_sel[mask,:]
            
            
@@ -1099,11 +1099,18 @@ class PyRSM:
                         prob_cur_bw=np.dot(Trpr,np.diag(obs[:,j])).dot(prob_pre_bw)
         
                     scalefact_fw[i]=prob_cur_fw.sum()
-                    prob_fw[:,i]=prob_cur_fw/scalefact_fw[i]
+                    if scalefact_fw[i]==0:
+                        prob_fw[:,i]=0
+                    else:
+                        prob_fw[:,i]=prob_cur_fw/scalefact_fw[i]
                     prob_pre_fw=prob_fw[:,i]
         
                     scalefact_bw[j]=prob_cur_bw.sum()
-                    prob_bw[:,j]=prob_cur_bw/scalefact_bw[j]
+                    if scalefact_bw[j]==0:
+                        prob_bw[:,j]=0
+                    else:
+                        prob_bw[:,j]=prob_cur_bw/scalefact_bw[j]
+                        
                     prob_pre_bw=prob_bw[:,j]
     
             scalefact_fw_tot=(scalefact_fw).sum()                
@@ -1111,8 +1118,8 @@ class PyRSM:
     
     
             for k in range(obs.shape[1]):
-                if prob_fw[:,k].sum()==0 or prob_bw[:,k].sum()==0:
-                    prob_fin[:,k]=np.nan
+                if (prob_fw[:,k]*prob_bw[:,k]).sum()==0:
+                    prob_fin[:,k]=0
                 else:
                     prob_fin[:,k]=(prob_fw[:,k]*prob_bw[:,k])/(prob_fw[:,k]*prob_bw[:,k]).sum()
     
