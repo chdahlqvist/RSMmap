@@ -3,8 +3,7 @@ hciplot ~= 0.1.3
 scikit-learn ~= 0.17
 scikit-image ~= 0.11
 pandas ~= 0.18
-numpy ~= 1.18
+numpy >= 1.15
 scipy ~= 1.1.0
-numpy ~= 1.18
 photutils ~= 0.6
 
