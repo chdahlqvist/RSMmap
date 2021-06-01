@@ -4,7 +4,7 @@ import os
 from hciplot import plot_frames
 import sys
 sys.path.append('../../')   # append the path to PyRSM
-import PyRSM
+from PyRSM import PyRSM
 
 
 os.chdir('/Users/..')
@@ -61,7 +61,7 @@ d.lik_esti(verbose=True)
 
 # Estimate final RSM map
      
-d.probmap_esti(estimator='Forward-Backward',colmode='median')
+d.probmap_esti(estimator='Forward',colmode='median')
 
 # Plot final probability map
 
@@ -88,7 +88,7 @@ d.add_method('LLSG',interval=[5], intensity='Annulus', distri='A', rank=5, var='
 
 # Estimate the probability map
 
-d.opti_map(estimator='Forward-Backward',colmode='median',threshold=False,Full=True)
+d.opti_map(estimator='Forward',colmode='median',threshold=False,Full=True)
 
 # Plot final probability map
 
