@@ -1876,7 +1876,11 @@ class PyRSM:
                                                    ang_fc[i]))
             x = int(cenx) + ann_center * np.cos(np.deg2rad(
                                                    ang_fc[i]))
-            fc_map = frame_inject_companion(fc_map, psf_template[0], y, x,
+            if self.cube[cuben].ndim==4:
+                fc_map = frame_inject_companion(fc_map, psf_template[0], y, x,
+                                            flux)
+            else:
+                fc_map = frame_inject_companion(fc_map, psf_template, y, x,
                                             flux)
             fcy.append(y)
             fcx.append(x)
