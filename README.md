@@ -1,28 +1,41 @@
-# PyRSM 
+#PyRSM 
+**PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and ADI+SDI) sequences (see Dahlqvist et al. A&A, 2020, 633, A95).
+The RSM map algorithm relies on one or several **PSF subtraction techniques** to process one or multiple **ADI sequences** (or ADI+SDI) before computing a final probability map. Considering the large
+set of parameters needed for the computation of the RSM detection map (parameters for the selected PSF-subtraction techniques as well as the RSM algorithm itself), a parameter selection framework
+called **auto-RSM** (Dahlqvist et al., 2021 in prep) is proposed to automatically select the optimal parametrization. The proposed multi-step parameter optimization framework can be divided into 
+three main steps, (i) the selection of the optimal set of parameters for the considered PSF-subtraction techniques, (ii) the optimization of the RSM approach parametrization, and (iii) the 
+selection of the optimal set of PSF-subtraction techniques and ADI sequences to be considered when generating the final detection map. 
 
-**PyRSM** is a python package for exoplanets detection which applies the **Regime Switching Model** (RSM) framework on ADI (and ADI+SDI) sequences (see Dahlqvist et al. A&A, 2020, 633, A95).The RSM map algorithm relies on one or several **PSF subtraction techniques** to process one or multiple **ADI sequences** (or ADI+SDI) before computing a final probability map. Considering the large set of parameters needed for the computation of the RSM detection map (parameters for the selected PSF-subtraction techniques as well as the RSM algorithm itself), a parameter selection framework called **auto-RSM** (Dahlqvist et al., 2021 in prep) is proposed to automatically select the optimal parametrization. The proposed multi-step parameter optimization framework can be divided into three main steps, (i) the selection of the optimal set of parameters for the considered PSF-subtraction techniques, (ii) the optimization of the RSM approach parametrization, and (iii) the selection of the optimal set of PSF-subtraction techniques and ADI sequences to be considered when generating the final detection map. 
-
-The *add_cube* and *add_model* functions allows to consider several ADI or ADI+SDI sequences and models to generate
+The *add_cube* and *add_model* methods allows to consider several ADI or ADI+SDI sequences and models to generate
 the cube of residuals used to compute the RSM map. The cube should be provided by the same instrument
 or rescaled to a unique pixel size. A specific PSF should be provided for each cube. In the case of ADI+SDI, 
 a single psf should be provided per cube (typically the PSF averaged over the set of frequencies, as the package 
 does not acomodate yet 3-dimensionnal PSF). Five different models and two forward model variants are available. 
-Each model can be parametrized separately. The function *like_esti* allows the estimation of a cube of 
+Each model can be parametrized separately. The method *like_esti* allows the estimation of a cube of 
 likelihoods containing for each pixel and each frame the likelihood of being in the planetary or the speckle 
-regime. These likelihood cubes are then used by the *probmap_esti* function to provide the final probability 
+regime. These likelihood cubes are then used by the *probmap_esti* method to provide the final probability 
 map based on the RSM framework. 
 
-The second set of funtions regroups the four main functions used by the auto-RSM/auto-S/N framework.
-The *opti_model* function allows the optimization of the PSF subtraction techniques parameters based on the 
-minimisation of the average annulus-wise contrast. The *opti_RSM* function takes care of the optimization of the parameters 
+The second set of methods regroups the four main methods used by the auto-RSM/auto-S/N framework.
+The *opti_model* method allows the optimization of the PSF subtraction techniques parameters based on the 
+minimisation of the average annulus-wise contrast. The *opti_RSM* method takes care of the optimization of the parameters 
 of the RSM framework (all related to the computation of the likelihood associated to every pixels and frames). The
-third function *opti_combination*, relies on a greedy selection algorithm to define the optimal set of 
+third method *opti_combination*, relies on a greedy selection algorithm to define the optimal set of 
 ADI sequences and PSF-subtraction techniques to consider when generating the final detection map using the RSM
-approach. Finally, the *opti_map* function allows to compute the final RSM detection map. The optimization of
+approach. Finally, the *opti_map* method allows to compute the final RSM detection map. The optimization of
 the parameters can be done using the reversed parallactic angles, blurring potential planetary signals while
 keeping the main characteristics of the speckle noise. An S/N map based code is also proposed and encompasses
-the *opti_model*, the *opti_combination* and the *opti_map* functions. For the last two functions, the SNR 
+the *opti_model*, the *opti_combination* and the *opti_map* methods. For the last two methods, the SNR 
 parameter should be set to True.
+
+The last set of methods regroups the methods allowing the computation of contrast curves and the 
+characterization of a detected astrophysical signals. The *contrast_curve* method allows the computation
+ of a contrast curve at a pre-defined completeness level (see Dahlqvist et al. 2021 for more details), 
+ while the *contrast_matrix* method provided contrast curves for a range of completeness levels defined
+ by the number of fake companion injected (completeness level from 1/n_fc to 1-1/n_fc with n_fc the number
+ of fake companions). This last method provides a good representation of the contrast/completeness 
+ distribution but requires a longer computation time. The *target_charact* method allows the 
+ estimation of the photometry and astrometry of a detected signal (see Dahlqvist et al. 2022 for more details)
 
 A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided in the folder example to test the PyRSM class. A list of parameters for the PyRSM class and for the main functions are given below:
 
@@ -30,12 +43,12 @@ A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided 
 
 The package may be installed via pip install using the command:
 
->pip install https://github.com/chdahlqvist/RSMmap/releases/download/0.2.0/PyRSM.tar.gz
+>pip install https://github.com/chdahlqvist/RSMmap/archive/0.3.0.tar.gz
 
 A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example).
 
 
-## PyRSM class
+##PyRSM class
 
 * fwhm: int
     Full width at half maximum for the instrument PSF
@@ -47,6 +60,11 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     Center radius of the last annulus considered in the RSM probability
     map estimation. The radius should be smaller or equal to half the
     size of the image minus half the value of the 'crop' parameter 
+* interval: list of float or int, optional
+    List of values taken by the delta parameter defining, when mutliplied by the 
+    standard deviation, the strengh of the planetary signal in the Regime Switching model.
+    Default is [1]. The different delta paramaters are tested and the optimal value
+    is selected via maximum likelmihood.
 * pxscale : float
     Value of the pixel in arcsec/px. Only used for printing plots when
     'showplot=True' in like_esti. 
@@ -83,7 +101,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     See the documentation of the 'vip_hci.preproc.frame_rotate' function. 
 
 
-## add_cube
+##add_cube
 
 * psf : numpy ndarray 2d
     2d array with the normalized PSF template, with an odd shape.
@@ -103,7 +121,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     to get the scaling factors). This scaling factors are used to re-scale
     the spectral channels and align the speckles. Default is None
     
-## add_model
+##add_model
 
 * model : str
     Selected ADI-based post-processing techniques used to 
@@ -140,11 +158,6 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     are provided in PyRSM init (multi_factor), the multiplicative factor applied to the noise
     variance is selected via the maximisation of the total likelihood of the regime switching
     model for the selected annulus. Default is 'Annulus'.
-* interval: list of float or int, optional
-    List of values taken by the delta parameter defining, when mutliplied by the 
-    standard deviation, the strengh of the planetary signal in the Regime Switching model.
-    Default is [1]. The different delta paramaters are tested and the optimal value
-    is selected via maximum likelmihood.
 * distri: str, optional
     Probability distribution used for the estimation of the likelihood 
     of both regimes (planetary or noise) in the Regime Switching framework.
@@ -205,10 +218,6 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     Range of crop sizes considered in the estimation of the RSM map, starting with crop_size
     and increasing the crop size incrementally by 2 pixels up to a crop size of 
     crop_size + 2 x (crop_range-1).
-* ini_esti: int, optional
-    Number of loss function computations (average contrast) to initialize the Gaussian 
-    process used during the Bayesian optimization of the PSF-subtraction technique parameters
-    (APCA, LOCI, KLIP FM and LOCI FM). Default is 40.
 * opti_bound: list, optional
     List of boundaries used for the parameter optimization. 
         - For APCA: [[L_ncomp,U_ncomp],[L_nseg,U_nseg],[L_delta_rot,U_delta_rot]]
@@ -226,7 +235,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     with L_ the lower bound and U_ the Upper bound.   
     
     
-## like_esti
+##like_esti
 
 * showplot: bool, optional
     If True, provides the plots of the final residual frames for the selected 
@@ -240,7 +249,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
 * verbose : bool, optional
     If True prints intermediate info. Default is True.
     
-## prob_esti
+##prob_esti
 
 * modtocube: bool, optional
     Parameter defining if the concatenated cube feeding the RSM model is created
@@ -274,16 +283,30 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     technique, etc. Default is None whih implies that all PSF-subtraction techniques and all
     ADI sequences are used to compute the final probability map.
     
-## opti_model
+##opti_model
 
-* maxiter: int, optional
-    Maximum number of iterations of the Bayesian optimization algorithm for 
-    APCA, LOCI, KLIP FM and LOCI FM. Default is 40.
+* optimisation_model: str, optional
+    Approach used for the paramters optimal selection via the maximization of the 
+    contrast for APCA, LOCI, KLIP and KLIP FM. The optimization is done either
+    via a Bayesian approach ('Bayesian') or using Particle Swarm optimization
+    ('PSO'). Default is PSO.
+* param_optimisation: dict, optional
+    dictionnary regrouping the parameters used by the Bayesian or the PSO optimization
+    framework. For the Bayesian optimization we have 'opti_iter' the number of iterations,
+    ,'ini_esti' number of sets of parameters for which the loss function is computed to
+    initialize the Gaussian process, random_search the number of random searches for the
+    selection of the next set of parameters to sample based on the maximisation of the 
+    expected immprovement. For the PSO optimization, 'w' is the inertia factor, 'c1' is
+    the cognitive factor and 'c2' is the social factor, 'n_particles' is the number of
+    particles in the swarm (number of point tested at each iteration), 'opti_iter' the 
+    number of iterations,'ini_esti' number of sets of parameters for which the loss
+    function is computed to initialize the PSO. {'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10
+    ,'opti_iter':15,'ini_esti':10, 'random_search':100}
 * filt: True, optional
     If True, a Hampel Filter is applied on the set of parameters for the annular mode
     in order to avoid outliers due to potential bright artefacts.
     
-## opti_RSM
+##opti_RSM
 
 * estimator: str, optional
     Approach used for the probability map estimation either a 'Forward' model
@@ -295,7 +318,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
     the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
     
-## opti_combination
+##RSM_combination
 
 * estimator: str, optional
     Approach used for the probability map estimation either a 'Forward' model
@@ -325,7 +348,7 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     subsequently the opti_map. If False the auto-RSM framework is used, providing an optimized
     probability map when using subsequently the opti_map.
     
-## opti_map
+##opti_map
 
 * estimator: str, optional
     Approach used for the probability map estimation either a 'Forward' model
@@ -349,3 +372,142 @@ A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is prov
     If True, the auto-S/N framework is used, resulting in an optimizated final S/N map when using 
     subsequently the opti_map. If False the auto-RSM framework is used, providing an optimized
     probability map when using subsequently the opti_map.
+    
+##contrast_curve
+
+* an_dist: list or ndarray
+    List of angular separations for which a contrast has to be estimated.
+* ini_contrast: list or ndarray
+    Initial contrast for the range of angular separations included in an_dist.
+    The number of initial contrasts shoul be equivalent to the number of angular
+    separations.
+* probmap: numpy 2d ndarray
+    Detection map provided by the RSM algorithm via opti_map or probmap_esti.
+* inv_ang: bool, optional
+    If True, the sign of the parallactic angles of all ADI sequence is flipped for
+    the computation of the contrast. Default is False.
+* threshold: bool, optional 
+    If an angular separation based threshold has been used when generating the
+    detection map, the same set of thresholds should be considered as well during
+    the contrast computation. Default is False.
+* psf_oa: bool, optional, optional
+    Saturated PSF of the host star used to compute the scaling factor allowing the 
+    conversion between contrasts and fluxes for the injection of fake companions
+    during the computation of the contrast. If no Saturated PSF is provided, the 
+    ini_contrast should be provided in terms of flux instead of contrast. 
+    Default is None.
+* estimator: str, optional
+    Approach used for the probability map estimation either a 'Forward' model
+    (approach used in the original RSM map algorithm) which consider only the 
+    past observations to compute the current probability or 'Forward-Backward' model
+    which relies on both past and future observations to compute the current probability
+* colmode:str, optional
+    Method used to generate the final probability map from the three-dimensionnal cube
+    of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
+    the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
+* n_fc: int, optional
+    Number of azimuths considered for the computation of the True positive rate/completeness,
+    (number of fake companions injected separately). The number of azimuths is defined 
+    such that the selected completeness is reachable (e.g. 95% of completeness requires at least
+    20 fake companion injections). Default 20.
+* completeness: float, optional
+    The completeness level to be achieved when computing the contrasts, i.e. the True positive
+    rate reached at the threshold associated to the first false positive (the first false 
+    positive is defined as the brightest speckle present in the entire detection map). Default 95.
+
+##contrast_matrix
+
+* an_dist: list or ndarray
+    List of angular separations for which a contrast has to be estimated.
+* ini_contrast: list or ndarray
+    Initial contrast for the range of angular separations included in an_dist.
+    The number of initial contrasts shoul be equivalent to the number of angular
+    separations.
+* probmap: numpy 2d ndarray
+    Detection map provided by the RSM algorithm via opti_map or probmap_esti.
+* inv_ang: bool, optional
+    If True, the sign of the parallactic angles of all ADI sequence is flipped for
+    the computation of the contrast. Default is False.
+* threshold: bool, optional 
+    If an angular separation based threshold has been used when generating the
+    detection map, the same set of thresholds should be considered as well during
+    the contrast computation. Default is False.
+* psf_oa: bool, optional, optional
+    Saturated PSF of the host star used to compute the scaling factor allowing the 
+    conversion between contrasts and fluxes for the injection of fake companions
+    during the computation of the contrast. If no Saturated PSF is provided, the 
+    ini_contrast should be provided in terms of flux instead of contrast. 
+    Default is None.
+* estimator: str, optional
+    Approach used for the probability map estimation either a 'Forward' model
+    (approach used in the original RSM map algorithm) which consider only the 
+    past observations to compute the current probability or 'Forward-Backward' model
+    which relies on both past and future observations to compute the current probability
+* colmode:str, optional
+    Method used to generate the final probability map from the three-dimensionnal cube
+    of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
+    the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
+* n_fc: int, optional
+    Number of azimuths considered for the computation of the True positive rate/completeness,
+    (number of fake companions injected separately). The range of achievable completenness 
+    depends on the number of considered azimuths (the minimum completeness is defined as
+    1/n_fc an the maximum is 1-1/n_fc). Default 20.
+    
+#target_characterisation
+
+* expected_pos: list or ndarray
+    (Y,X) position of the detected planetary candidate.
+* psf_oa: bool, optional
+    Saturated PSF of the host star used to compute the scaling factor allowing the 
+    conversion between contrasts and fluxes. If no Saturated PSF is provided, the 
+    photometry will be provided in terms of flux not contrast. 
+    Default is None.
+* ns: float , optional
+    Number of regime switches. Default is one regime switch per annulus but 
+    smaller values may be used to reduce the impact of noise or disk structures
+    on the final RSM probablity map. The number of regime switches my be increase
+    in the case of faint sources to ease their characterization. Default is 1.
+* loss_func: str, optional
+    Loss function used for the computation of the source astrometry and photometry.
+    If 'value', it relies on the minimization of the average probability within a 2
+    FWHM aperture centered on the expected position of the source. If 'prob', it
+    considers the entire annulus for the computation of the background noise statistics
+    and use a Gaussian distribution to determine the probability that the probabilities
+    associated with the planetary candidates in the detection map belongs to the 
+    background noise distribution. Default is 'value'.
+* optimisation_model: str, optional
+    Approach used for the astrometry and photometry estimation (minimisation 
+    of the probabilities within a 2 FWHM aperture centered on the detected source).
+    The optimization is done either via a Bayesian approach ('Bayesian') or using
+    Particle Swarm optimization('PSO'). Default is PSO.
+* param_optimisation: dict, optional
+    dictionnary regrouping the parameters used by the Bayesian or the PSO optimization
+    framework. For the Bayesian optimization we have 'opti_iter' the number of iterations,
+    ,'ini_esti' number of sets of parameters for which the loss function is computed to
+    initialize the Gaussian process, random_search the number of random searches for the
+    selection of the next set of parameters to sample based on the maximisation of the 
+    expected immprovement. For the PSO optimization, 'w' is the inertia factor, 'c1' is
+    the cognitive factor and 'c2' is the social factor, 'n_particles' is the number of
+    particles in the swarm (number of point tested at each iteration), 'opti_iter' the 
+    number of iterations,'ini_esti' number of sets of parameters for which the loss
+    function is computed to initialize the PSO. {'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10
+    ,'opti_iter':15,'ini_esti':10,'random_search':100}
+* photo_bound: list, optional
+    Photometry range considered during the estimation. The range, expressed in terms of
+    contrast (or flux if psf_oa is not provided), is given by the first two number, while
+    the third number gives the number of tested values within this range. The fourth number
+    gives the admissible error after the initial estimation of the photometry and is used
+    by the PSO or Bayesian optimisation function to defined the range of possible values
+    for the photometry (initial value +- admissible error). Default [1e-5,1e-4,10,2e-5].
+* ci_esti: str, optional
+    Parameters determining if a confidence interval should be computed for the photometry
+    and astrometry.The erros associated with the photometry and astrometry can be estimated
+    via the inversion of the hessian matrix ('hessian') or via the BFGS minimisation approach 
+    ('BFGS') which allows to further improve the precision of the estimates but requires 
+    more computation time. Default is None, implying no computation of confidence intervals.
+* first_guess: boolean, optional
+    Define if an initialisation of the algorrithm is done via a standard negfc (using the VIP
+    function firstguess) before applying the PSO or Bayesian optimisation. This initialisation
+    is useful when the target is very bright. It relies on PCA approach, SNR ratio maps and
+    negative fake companion injection to estimate the photometry and astrometry. Default is
+    False.

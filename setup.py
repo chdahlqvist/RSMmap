@@ -40,8 +40,8 @@ with open(resource('README.md')) as readme_file:
 
 setup(
     name='PyRSM',
-    version=0.2,
-    description='Package for exoplanet detection via RSM map algorithm (optimal parametrization via auto-RSM framework)',
+    version=0.3,
+    description='Package for exoplanet detection and characterization via the RSM map algorithm (optimal parametrization via auto-RSM framework)',
     long_description=README,
     license='MIT',
     author='Carl-Henrik Dahlqvist',
