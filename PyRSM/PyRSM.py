@@ -6,28 +6,36 @@ called auto-RSM (Dahlqvist et al., 2021 in prep) is proposed to automatically se
 three main steps, (i) the selection of the optimal set of parameters for the considered PSF-subtraction techniques, (ii) the optimization of the RSM approach parametrization, and (iii) the 
 selection of the optimal set of PSF-subtraction techniques and ADI sequences to be considered when generating the final detection map. 
 
-
-The add_cube and add_model functions allows to consider several cubes and models to generate
+The add_cube and add_model methods allows to consider several cubes and models to generate
 the cube of residuals used to compute the RSM map. The cube should be provided by the same instrument
 or rescaled to a unique pixel size. The class can be used with only ADI and ADI+SDI. A specific PSF should 
 be provided for each cube. In the case of ADI+SDI a single psf should be provided per cube (typically the PSF
 average over the set of frequencies Five different models and two forward model variants are available. 
 Each model can be parametrized separately. Five different models and two forward model variants are available. 
-The function like_esti allows the estimation of a cube of likelihoods containing for each pixel
+The method like_esti allows the estimation of a cube of likelihoods containing for each pixel
 and each frame the likelihood of being in the planetary or the speckle regime. These likelihood cubes
-are then used by the probmap_esti function to provide the final probability map based on the RSM framework. 
+are then used by the probmap_esti method to provide the final probability map based on the RSM framework. 
 
-The second set of funtions regroups the four main functions used by the auto-RSM/auto-S/N framework.
-The opti_model function allows the optimization of the PSF subtraction techniques parameters based on the 
-minimisation of the average contrast. The opti_RSM function takes care of the optimization of the parameters 
+The second set of methods regroups the four main methods used by the auto-RSM/auto-S/N framework.
+The opti_model method allows the optimization of the PSF subtraction techniques parameters based on the 
+minimisation of the average contrast. The opti_RSM method takes care of the optimization of the parameters 
 of the RSM framework (all related to the computation of the likelihood associated to every pixels and frames). The
-third function RSM_combination, relies on a greedy selection algorithm to define the optimal set of 
+third method RSM_combination, relies on a greedy selection algorithm to define the optimal set of 
 ADI sequences and PSF-subtraction techniques to consider when generating the final detection map using the RSM
-approach. Finally, the opti_map function allows to compute the final RSM detection map. The optimization of
+approach. Finally, the opti_map method allows to compute the final RSM detection map. The optimization of
 the parameters can be done using the reversed parallactic angles, blurring potential planetary signals while
 keeping the main characteristics of the speckle noise. An S/N map based code is also proposed and encompasses
-the opti_model, the RSM_combination and the opti_map functions. For the last two functions, the SNR 
+the opti_model, the RSM_combination and the opti_map methods. For the last two methods, the SNR 
 parameter should be set to True.
+
+The last set of methods regroups the methods allowing the computation of contrast curves and the 
+characterization of a detected astrophysical signals. The self.contrast_curve method allows the computation
+ of a contrast curve at a pre-defined completeness level (see Dahlqvist et al. 2021 for more details), 
+ while the self.contrast_matrix method provided contrast curves for a range of completeness levels defined
+ by the number of fake companion injected (completeness level from 1/n_fc to 1-1/n_fc with n_fc the number
+ of fake companions). This last method provides a good representation of the contrast/completeness 
+ distribution but requires a longer computation time. The self.target_charact() method allows the 
+ estimation of the photometry and astrometry of a detected signal (see Dahlqvist et al. 2022 for more details)
 
 Part of the code have been directly inspired by the VIP and PyKLIP packages for the estimation of the cube
 of residuas and forward model PSF.
@@ -37,9 +45,9 @@ __author__ = 'Carl-Henrik Dahlqvist'
 
 import numpy as np
 from scipy.optimize import curve_fit
-from skimage.draw import circle 
+from skimage.draw import disk 
 import vip_hci as vip
-from vip_hci.var import get_annulus_segments,frame_center
+from vip_hci.var import get_annulus_segments,frame_center,prepare_matrix
 from vip_hci.preproc import frame_crop,cube_derotate,cube_crop_frames,cube_collapse
 from vip_hci.metrics import cube_inject_companions, frame_inject_companion, normalize_psf
 from hciplot import plot_frames 
@@ -51,9 +59,18 @@ import pickle
 import multiprocessing as mp
 import sklearn.gaussian_process as gp
 from scipy.stats import norm
-from .utils import (llsg_adisdi,loci_adisdi,do_pca_patch,_decompose_patch,
+import pyswarms.backend as P
+from pyswarms.backend.topology import Star  
+import scipy as sc
+import lmfit
+from scipy.optimize import minimize
+import math
+import warnings
+warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning) 
+from utils import (llsg_adisdi,loci_adisdi,do_pca_patch,_decompose_patch,
 annular_pca_adisdi,NMF_patch,nmf_adisdi,LOCI_FM,KLIP_patch,perturb,KLIP,
-get_time_series,poly_fit,interpolation,remove_outliers,check_delta_sep ,rot_scale)
+get_time_series,poly_fit,interpolation,remove_outliers,check_delta_sep ,rot_scale,
+bayesian_optimization,Hessian)
 
 
 
@@ -165,6 +182,9 @@ class PyRSM:
         self.crop=[]
         self.crop_range=[]
         
+        self.snr_evolution=[]
+        self.snr_combined_evolution=[]
+        
         self.like_fin=[]
         self.flux_FMMF=[]
         self.distrisel=[]
@@ -179,6 +199,8 @@ class PyRSM:
         
         self.opti_sel=None
         self.threshold=None
+        
+        self.final_map=None
         
         
     def add_cube(self,psf, cube, pa, scale_list=None):
@@ -197,7 +219,7 @@ class PyRSM:
             centered and flux-normalized PSF template.
         cube : numpy ndarray, 3d or 4d
             Input cube (ADI sequences), Dim 1 = temporal axis, Dim 2-3 = spatial axis
-            Input cube (ADI + SDI sequences), Dim 1 = temporal axis, Dim 2=wavelength
+            Input cube (ADI + SDI sequences), Dim 1 = wavelength, Dim 2=temporal axis
             Dim 3-4 = spatial axis     
         pa : numpy ndarray, 1d
             Parallactic angles for each frame of the ADI sequences. 
@@ -224,7 +246,7 @@ class PyRSM:
         self.psf_fm.append([]) 
               
 
-    def add_method(self, model,delta_rot=0.5,delta_sep=0.1,asize=5,nsegments=1,ncomp=20,rank=5,tolerance=1e-2,interval=[5],intensity='Annulus',distri='A',var='ST',distrifit=False,crop_size=5, crop_range=1,ini_esti=60,opti_bound=None):
+    def add_method(self, model,delta_rot=0.5,delta_sep=0.1,asize=5,nsegments=1,ncomp=20,rank=5,tolerance=1e-2,interval=[5],intensity='Annulus',distri='A',var='ST',distrifit=False,crop_size=5, crop_range=1,opti_bound=None):
 
         
         """
@@ -336,10 +358,7 @@ class PyRSM:
             Range of crop sizes considered in the estimation of the RSM map, starting with crop_size
             and increasing the crop size incrementally by 2 pixels up to a crop size of 
             crop_size + 2 x (crop_range-1).
-        ini_esti: int, optional
-            Number of loss function computations (average contrast) to initialize the Gaussian 
-            process used during the Bayesian optimization of the PSF-subtraction technique parameters
-            (APCA, LOCI, KLIP FM and LOCI FM). Default is 60.
+    
         opti_bound: list, optional
             List of boundaries used for the parameter optimization. 
                 - For APCA: [[L_ncomp,U_ncomp],[L_nseg,U_nseg],[L_delta_rot,U_delta_rot]]
@@ -374,7 +393,7 @@ class PyRSM:
             if self.cube[c].ndim==4:
                 if any(var in myvar for myvar in ['ST','SM','TE'])==True:
                     raise ValueError("'var' not recognized for ADI+SDI cube'. 'var' should be 'FR' or 'FM'")   
-                if any(model in mymodel for mymodel in ['FM KLIP','FM LOCI','KLIP'])==True:
+                if any(model == mymodel for mymodel in ['FM KLIP','FM LOCI','KLIP'])==True:
                     raise ValueError("ADI+SDI sequences can only be used with APCA, NMF, LLSG and LOCI")
                 check_delta_sep(self.scale_list[c],delta_sep,self.minradius,self.fwhm,c)
         
@@ -385,11 +404,13 @@ class PyRSM:
         self.ncomp.append(np.array([np.repeat(ncomp,(len(self.cube)))]*(self.maxradius+asize)))  
         self.rank.append(np.array([np.repeat(rank,(len(self.cube)))]*(self.maxradius+asize)))
         self.tolerance.append(np.array([np.repeat(tolerance,(len(self.cube)))]*(self.maxradius+asize)))
-        self.interval.append(np.array([[np.repeat(interval,(len(self.cube)))]]*(self.maxradius+asize)))
+        self.interval.append(np.array([[interval]*(len(self.cube))]*(self.maxradius+asize)))
         self.asize.append(asize)
         self.opti_bound.append(opti_bound)
         
-
+        self.snr_evolution.append(np.array([np.repeat(None,(len(self.cube)))]*(self.maxradius+asize)))
+        self.snr_combined_evolution.append(np.array(np.repeat(None,(len(self.cube)))))
+        
         self.distrifit.append(np.array([np.repeat(distrifit,(len(self.cube)))]*(self.maxradius+asize)))
         self.intensity.append(np.array([np.repeat(intensity,(len(self.cube)))]*(self.maxradius+asize)))
         self.var.append(np.array([np.repeat(var,(len(self.cube)))]*(self.maxradius+asize)))
@@ -397,8 +418,6 @@ class PyRSM:
 
         self.crop_range.append(crop_range)
         self.distri.append(distri)  
-        
-        self.ini_esti.append(ini_esti)  
 
 
         for i in range(len(self.cube)):
@@ -464,11 +483,13 @@ class PyRSM:
         range_int=len(self.interval[modn][ann_center,cuben])
         
         likemap=np.zeros(((n*z)+1,x,y,range_int,2,self.crop_range[modn]))
-           
+        
+        np.random.seed(10) 
 
         def likfcn(cuben,modn,mean,var,mixval,max_hist,mcube,ann_center,distrim,evals=None,evecs_matrix=None, KL_basis_matrix=None,refs_mean_sub_matrix=None,sci_mean_sub_matrix=None,resicube_klip=None,probcube=0,var_f=None, ind_ref_list=None,coef_list=None):
 
-        
+            np.random.seed(10) 
+            
             phi=np.zeros(2)
             n,y,x=mcube.shape 
             ceny, cenx = frame_center(mcube[0])
@@ -483,8 +504,8 @@ class PyRSM:
                 else:
                     
                     psf_formod=False
-                    
-                psf_fm_out=np.zeros((len(indicesx),mcube.shape[0],2*round(self.fwhm)+1,2*round(self.fwhm)+1))
+                
+                psf_fm_out=np.zeros((len(indicesx),mcube.shape[0],int(2*round(self.fwhm)+1),int(2*round(self.fwhm)+1)))
 
             if (self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1))!=self.psf[cuben].shape[-1]:
                 psf_temp=frame_crop(self.psf[cuben],int(self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1)),cenxy=[int(self.psf[cuben].shape[1]/2),int(self.psf[cuben].shape[1]/2)],verbose=False)
@@ -525,7 +546,7 @@ class PyRSM:
 
 
                             psf_map_der = cube_derotate(psf_map, self.pa[cuben], imlib='opencv',interpolation='lanczos4')
-                            psfm_temp=cube_crop_frames(psf_map_der,2*round(self.fwhm)+1,xy=(poscentx,poscenty),verbose=False)
+                            psfm_temp=cube_crop_frames(psf_map_der,int(2*round(self.fwhm)+1),xy=(poscentx,poscenty),verbose=False)
                             psf_fm_out[i,:,:,:]=psfm_temp
                             
                     else:
@@ -560,7 +581,7 @@ class PyRSM:
         
                             cube_res_fc[:, indices[0][0], indices[0][1]] = matrix_res_fc
                             cube_der_fc = cube_derotate(cube_res_fc-np.mean(cube_res_fc), self.pa[cuben], imlib='opencv', interpolation='lanczos4')
-                            psfm_temp=cube_crop_frames(cube_der_fc,2*round(self.fwhm)+1,xy=(poscentx,poscenty),verbose=False)
+                            psfm_temp=cube_crop_frames(cube_der_fc,int(2*round(self.fwhm)+1),xy=(poscentx,poscenty),verbose=False)
                             psf_fm_out[i,:,:,:]=psfm_temp
                             
                     else:
@@ -639,7 +660,7 @@ class PyRSM:
                                 mv=mixval[v]
                                 sel_distri=distrim[v]
                                 maxhist=max_hist[v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(svar)
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[v])
             
                             elif self.var[modn][ann_center,cuben]=='FR':
                                 svar=var[j,v]
@@ -647,7 +668,7 @@ class PyRSM:
                                 mv=mixval[j,v]
                                 sel_distri=distrim[j,v]
                                 maxhist=max_hist[j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(svar)
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[j,v])
             
                             elif self.var[modn][ann_center,cuben]=='SM':
                                 svar=var[i,v]
@@ -655,7 +676,7 @@ class PyRSM:
                                 mv=mixval[i,v]
                                 sel_distri=distrim[i,v] 
                                 maxhist=max_hist[i,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(svar)
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,v])
             
                             elif self.var[modn][ann_center,cuben]=='FM' :
                                 svar=var[i,j,v]
@@ -663,7 +684,7 @@ class PyRSM:
                                 mv=mixval[i,j,v]
                                 sel_distri=distrim[i,j,v] 
                                 maxhist=max_hist[i,j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(svar)
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,j,v])
                                     
                             elif self.var[modn][ann_center,cuben]=='TE':
                                 svar=var[i,j,v]
@@ -671,7 +692,7 @@ class PyRSM:
                                 mv=mixval[i,j,v]
                                 sel_distri=distrim[i,j,v]  
                                 maxhist=max_hist[i,j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(svar)
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,j,v])
                                 
                             if self.intensity[modn][ann_center,cuben]=='Pixel':
                                 phi[1]=np.where(flux_esti[v]<=0,0,flux_esti[v]) 
@@ -811,18 +832,23 @@ class PyRSM:
             
             cube_rot_scale,angle_list,scale_list=rot_scale('ini',cube_test,None,self.pa[cuben],self.scale_list[cuben],self.imlib, self.interpolation)
             resicube=np.zeros_like(cube_rot_scale)
-
-            if scale_list is not None:
-                range_adisdi=range(int(max(scale_list)*ann_center/self.asize[modn]))
+            if self.opti_mode=='full-frame':
+                matrix = prepare_matrix(cube_rot_scale, None, None, mode='fullfr',
+                            verbose=False)
+                res= NMF_patch(matrix, ncomp=self.ncomp[modn][ann_center,cuben], max_iter=50000,random_state=None)
+                resicube=np.reshape(res,(cube_rot_scale.shape[0],cube_rot_scale.shape[1],cube_rot_scale.shape[2]))
             else:
-                range_adisdi=range(1)
-                
-            for i in range_adisdi:
-                indices = get_annulus_segments(cube_rot_scale[0], ann_center-int(self.asize[modn]/2)+self.asize[modn]*i,int(self.asize[modn]),int(self.nsegments[modn][ann_center,cuben]))
-                
-                for l in range(self.nsegments[modn][ann_center,cuben]):
-                
-                    resicube[:,indices[l][0], indices[l][1]]= NMF_patch(cube_rot_scale[:, indices[l][0], indices[l][1]], ncomp=self.ncomp[modn][ann_center,cuben], max_iter=100,random_state=None)
+                if scale_list is not None:
+                    range_adisdi=range(int(max(scale_list)*ann_center/self.asize[modn]))
+                else:
+                    range_adisdi=range(1)
+                    
+                for i in range_adisdi:
+                    indices = get_annulus_segments(cube_rot_scale[0], ann_center-int(self.asize[modn]/2)+self.asize[modn]*i,int(self.asize[modn]),int(self.nsegments[modn][ann_center,cuben]))
+                    
+                    for l in range(self.nsegments[modn][ann_center,cuben]):
+                    
+                        resicube[:,indices[l][0], indices[l][1]]= NMF_patch(cube_rot_scale[:, indices[l][0], indices[l][1]], ncomp=self.ncomp[modn][ann_center,cuben], max_iter=100,random_state=None)
 
             mcube=rot_scale('fin',self.cube[cuben],resicube,angle_list,scale_list,self.imlib, self.interpolation)
 
@@ -846,7 +872,7 @@ class PyRSM:
                     resicube[:,indices[l][0], indices[l][1]]= _decompose_patch(indices,l, cube_rot_scale,self.nsegments[modn][ann_center,cuben],
                             self.rank[modn][ann_center,cuben], low_rank_ref=False, low_rank_mode='svd', thresh=1,thresh_mode='soft', max_iter=40, auto_rank_mode='noise', cevr=0.9,
                                  residuals_tol=1e-1, random_seed=10, debug=False, full_output=False).T
-                        
+
             mcube=rot_scale('fin',self.cube[cuben],resicube,angle_list,scale_list,self.imlib, self.interpolation)
           
 
@@ -874,7 +900,9 @@ class PyRSM:
             
             def huber_loss(x,x0,delta,a):
                 abs_x=abs(x-x0)
-                return np.exp(-np.where(abs_x < delta, a * abs_x ** 2, 2*a*delta*abs_x -a*delta**2))
+                
+                huber_esti=np.exp(-a*np.where(abs_x < delta, 0.5*abs_x ** 2, delta*abs_x -0.5*delta**2))
+                return huber_esti
             
             def te_f_mh(func1,func2,bin_m,hist,p0_1,bounds_1,p0_2,bounds_2,mean,var,distri):
                try: 
@@ -887,7 +915,7 @@ class PyRSM:
                        fiter=sum(abs(func2(bin_m,*popt)-hist))
                        a=popt
                    except (RuntimeError, ValueError, RuntimeWarning):
-                       a=1
+                       a=0.01/max(abs(bin_m))
                        fiter=sum(abs(func2(bin_m,a)-hist))
                return mean,a,var,fiter,distri
                    
@@ -913,9 +941,9 @@ class PyRSM:
                        fiter=sum(abs(func2(bin_m,*popt)-hist))
                        a=popt
                    except (RuntimeError, ValueError, RuntimeWarning):
-                        a=1
+                        a=0.01/max(abs(bin_m))
                         fiter=sum(abs(func2(bin_m,a)-hist))
-                        print('error hubert loss')
+                        
 
                return mean,a,delta,fiter,distri
            
@@ -934,7 +962,11 @@ class PyRSM:
            
 
             mixval_temp=None
-            hist, bin_edge =np.histogram(arr,bins='auto',density=True)
+            try:
+                hist, bin_edge =np.histogram(arr,bins='auto',density=True)
+            except (IndexError, TypeError, ValueError):
+                hist, bin_edge =np.histogram(arr,bins=len(arr)/15,density=True)
+                
             bin_mid=(bin_edge[0:(len(bin_edge)-1)]+bin_edge[1:len(bin_edge)])/2
             
             if self.distrifit[modn][ann_center,cuben]==False:
@@ -954,7 +986,7 @@ class PyRSM:
                    mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_m(fixmix,bin_mid,hist,[0.5],[(0),(1)],mean_e,var_e,2)
                    
                elif self.distri[modn]=='H':
-                   mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_h(hl1,hl2,bin_mid,hist/max(hist),[np.mean(abs(bin_mid)),0.15],[(min(abs(bin_mid)),0.0001),(max(abs(bin_mid)),2)],[0.15],[(0.0001),(2)],mean_e,1,3)
+                   mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_h(hl1,hl2,bin_mid,hist/max(hist),[np.mean(abs(bin_mid)),0.01/max(abs(bin_mid))],[(min(abs(bin_mid)),0.0001/max(abs(bin_mid))),(max(abs(bin_mid)),2)],[0.01/max(abs(bin_mid))],[(0.0001),(2)],mean_e,1,3)
                    fiterr_temp=fiterr_temp*max(hist)
 
                elif self.distri[modn]=='A':
@@ -962,7 +994,7 @@ class PyRSM:
                     res.append(te_gl(gaus,bin_mid,hist,mean_e,var_e,0))
                     res.append(te_gl(lap,bin_mid,hist,mean_e,var_e,1))
                     res.append(te_m(fixmix,bin_mid,hist,[0.5],[(0),(1)],mean_e,var_e,2))
-                    res.append(te_h(hl1,hl2,bin_mid,hist/max(hist),[np.mean(abs(bin_mid)),0.15],[(min(abs(bin_mid)),0.0001),(max(abs(bin_mid)),2)],[0.15],[(0.0001),(2)],mean_e,1,3))
+                    res.append(te_h(hl1,hl2,bin_mid,hist/max(hist),[np.mean(abs(bin_mid)),0.01/max(abs(bin_mid))],[(min(abs(bin_mid)),0.0001/max(abs(bin_mid))),(max(abs(bin_mid)),2)],[0.01/max(abs(bin_mid))],[(0.0001),(2)],mean_e,1,3))
                     
                     fiterr=list([res[0][3],res[1][3],res[2][3],res[3][3]*max(hist)])
                     distrim_temp=fiterr.index(min(fiterr))
@@ -988,7 +1020,7 @@ class PyRSM:
                    mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_f_mh(mix,fixmix,bin_mid,hist,[mean_e,var_e,0.5],[(mean_e-np.sqrt(var_e),0,0),(mean_e+np.sqrt(var_e),4*var_e,1)],[0.5],[(0),(1)],mean_e,var_e,2)
 
                elif self.distri[modn]=='H':
-                   mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_f_mh(huber_loss,hl,bin_mid,hist/max(hist),[mean_e,np.mean(abs(bin_mid)),0.15],[(mean_e-np.sqrt(var_e),min(abs(bin_mid)),0.0001),(mean_e+np.sqrt(var_e),max(abs(bin_mid)),2)],[0.15],[(0.0001),(2)],mean_e,1,3)
+                   mean_temp,mixval_temp,var_temp,fiterr_temp,distrim_temp=te_f_mh(huber_loss,hl,bin_mid,hist/max(hist),[mean_e,np.mean(abs(bin_mid)),0.01/max(abs(bin_mid))],[(mean_e-np.sqrt(var_e),min(abs(bin_mid)),0.0001/max(abs(bin_mid))),(mean_e+np.sqrt(var_e),max(abs(bin_mid)),2)],[0.01/max(abs(bin_mid))],[(0.0001),(2)],mean_e,1,3)
                    fiterr_temp=fiterr_temp*max(hist)
                    
                elif self.distri[modn]=='A':
@@ -997,8 +1029,7 @@ class PyRSM:
                    res.append(te_f_gl(gaus,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),0),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,0))
                    res.append(te_f_gl(lap,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),0),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,1))
                    res.append(te_f_mh(mix,fixmix,bin_mid,hist,[mean_e,var_e,0.5],[(mean_e-np.sqrt(var_e),0,0),(mean_e+np.sqrt(var_e),4*var_e,1)],[0.5],[(0),(1)],mean_e,var_e,2))                   
-                   res.append(te_f_mh(huber_loss,hl,bin_mid,hist/max(hist),[mean_e,np.mean(abs(bin_mid)),0.15],[(mean_e-np.sqrt(var_e),min(abs(bin_mid)),0.0001),(mean_e+np.sqrt(var_e),max(abs(bin_mid)),2)],[0.15],[(0.0001),(2)],mean_e,1,3))
-
+                   res.append(te_f_mh(huber_loss,hl,bin_mid,hist/max(hist),[mean_e,np.mean(abs(bin_mid)),0.01/max(abs(bin_mid))],[(mean_e-np.sqrt(var_e),min(abs(bin_mid)),0.0001/max(abs(bin_mid))),(mean_e+np.sqrt(var_e),max(abs(bin_mid)),2)],[0.01/max(abs(bin_mid))],[(0.0001),(2)],mean_e,1,3))
                    fiterr=list([res[0][3],res[1][3],res[2][3],res[3][3]*max(hist)])
                    distrim_temp=fiterr.index(min(fiterr))
                    fiterr_temp=min(fiterr)
@@ -1018,6 +1049,7 @@ class PyRSM:
         if self.var[modn][ann_center,cuben]=='ST':
             
             var=np.zeros(self.crop_range[modn])
+            var_f=np.zeros(self.crop_range[modn])
             mean=np.zeros(self.crop_range[modn])
             mixval=np.zeros(self.crop_range[modn])
             fiterr=np.zeros(self.crop_range[modn])
@@ -1036,6 +1068,7 @@ class PyRSM:
             
                 mean[v],var[v],fiterr[v],mixval[v],distrim[v],max_hist[v]=vm_esti(modn,arr,np.var(mcube[:,poscenty,poscentx]),np.mean(mcube[:,poscenty,poscentx]))
                 
+                var_f[v]=np.var(mcube[:,poscenty,poscentx])
             
         elif self.var[modn][ann_center,cuben]=='FR':
             
@@ -1060,15 +1093,14 @@ class PyRSM:
                     
                     mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[a,poscenty,poscentx]),np.mean(mcube[a,poscenty,poscentx]))
 
-                    if self.intensity[modn][ann_center,cuben]=='Pixel':
-                    
-                        var_f[a,v]=np.var(mcube[a,poscenty,poscentx])
+                    var_f[a,v]=np.var(mcube[a,poscenty,poscentx])
                     
         elif self.var[modn][ann_center,cuben]=='SM':
             
             indicesy,indicesx=get_time_series(mcube,ann_center)
             
             var=np.zeros((len(indicesy),self.crop_range[modn]))
+            var_f=np.zeros((len(indicesy),self.crop_range[modn]))
             mean=np.zeros((len(indicesy),self.crop_range[modn]))
             mixval=np.zeros((len(indicesy),self.crop_range[modn]))
             fiterr=np.zeros((len(indicesy),self.crop_range[modn]))
@@ -1086,7 +1118,7 @@ class PyRSM:
                     else:
                         posup=a+int(cropf*3/2)+size_seg
                
-                    indc=circle(indicesy[a], indicesx[a],cropf/2)
+                    indc=disk((indicesy[a], indicesx[a]),cropf/2)
            
                     radist_b=np.sqrt((indicesx[a-int(cropf*3/2)-size_seg-1]-int(x/2))**2+(indicesy[a-int(cropf*3/2)-size_seg-1]-int(y/2))**2)
            
@@ -1122,7 +1154,8 @@ class PyRSM:
 
                     mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[:,positiony,positionx]),np.mean(mcube[:,positiony,positionx]))
 
-            
+                    var_f[a,v]=np.var(mcube[:,positiony,positionx])
+                    
         elif self.var[modn][ann_center,cuben]=='FM' :
             
             indicesy,indicesx=get_time_series(mcube,ann_center)
@@ -1142,7 +1175,7 @@ class PyRSM:
             
                 for a in range(0,len(indicesy)):
          
-                    indc=circle(indicesy[a], indicesx[a],3)
+                    indc=disk((indicesy[a], indicesx[a]),3)
                     positionx=[]
                     positiony=[]
         
@@ -1157,9 +1190,7 @@ class PyRSM:
                     
                         mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube[b,positiony,positionx])),np.mean(np.asarray(mcube[b,positiony,positionx])))
             
-                        if self.intensity[modn][ann_center,cuben]=='Pixel':
-                    
-                            var_f[a,b,v]=np.var(mcube[b,positiony,positionx])
+                        var_f[a,b,v]=np.var(mcube[b,positiony,positionx])
                             
         elif self.var[modn][ann_center,cuben]=='TE' :
         
@@ -1213,9 +1244,7 @@ class PyRSM:
 
                         mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube_sel)),np.mean(np.asarray(mcube_sel)))
 
-                        if self.intensity[modn][ann_center,cuben]=='Pixel':
-                    
-                            var_f[a,b,v]=np.var(np.asarray(mcube_sel))
+                        var_f[a,b,v]=np.var(np.asarray(mcube_sel))
          
 
         #Estimation of the cube of likelihoods
@@ -1268,35 +1297,41 @@ class PyRSM:
                     if self.opti==False:
                 
                         if self.model[i]=='APCA':
-                            print("Annular PCA estimation") 
-                            residuals_cube_, frame_fin = annular_pca_adisdi(self.cube[j], self.pa[j], self.scale_list[j], fwhm=self.fwhm, ncomp=self.ncomp[i][0,j], asize=self.asize[i], 
-                                      delta_rot=self.delta_rot[i][0,j],delta_sep=self.delta_sep[i][0,j],radius_int=self.minradius, svd_mode='lapack', n_segments=int(self.nsegments[i][0,j]), nproc=self.ncore,full_output=True,verbose=False)
+                            if verbose:
+                                print("Annular PCA estimation") 
+        
+                            residuals_cube_, frame_fin = annular_pca_adisdi(self.cube[j], self.pa[j], self.scale_list[j], fwhm=self.fwhm, ncomp=self.ncomp[i][0,j], asize=self.asize[i], radius_int=self.minradius, radius_out=self.maxradius,
+                                      delta_rot=self.delta_rot[i][0,j],delta_sep=self.delta_sep[i][0,j], svd_mode='lapack', n_segments=int(self.nsegments[i][0,j]), nproc=self.ncore,full_output=True,verbose=False)
                             if showplot:
                                 plot_frames(frame_fin,title='APCA', colorbar=True,ang_scale=True, axis=False,pxscale=self.pxscale,ang_legend=True,show_center=True)
         
                         elif self.model[i]=='NMF':
-                            print("NMF estimation") 
-                            residuals_cube_, frame_fin = nmf_adisdi(self.cube[j], self.pa[j], self.scale_list[j], ncomp=self.ncomp[i][0,j], max_iter=100, random_state=0, mask_center_px=None,full_output=True,verbose=False)
+                            if verbose:
+                                print("NMF estimation") 
+                            residuals_cube_, frame_fin = nmf_adisdi(self.cube[j], self.pa[j], self.scale_list[j], ncomp=self.ncomp[i][0,j], max_iter=5000, random_state=0, mask_center_px=None,full_output=True,verbose=False)
                             if showplot:
                                 plot_frames(frame_fin,title='NMF', colorbar=True,ang_scale=True, axis=False,pxscale=self.pxscale,ang_legend=True,show_center=True)
         
                         elif self.model[i]=='LLSG':
-                            print("LLSGestimation") 
+                            if verbose:
+                                print("LLSGestimation") 
         
-                            residuals_cube_, frame_fin = llsg_adisdi(self.cube[j], self.pa[j],self.scale_list[j], self.fwhm, rank=self.rank[i][0,j],asize=self.asize[i], thresh=1,n_segments=int(self.nsegments[i][0,j]), max_iter=40, random_seed=10, nproc=self.ncore,full_output=True,verbose=False)
+                            residuals_cube_, frame_fin = llsg_adisdi(self.cube[j], self.pa[j],self.scale_list[j], self.fwhm, rank=self.rank[i][0,j],asize=self.asize[i], thresh=1,n_segments=int(self.nsegments[i][0,j]),radius_int=self.minradius, radius_out=self.maxradius, max_iter=40, random_seed=10, nproc=self.ncore,full_output=True,verbose=False)
                            
                             if showplot:
                                 plot_frames(frame_fin,title='LLSG', colorbar=True,ang_scale=True, axis=False,pxscale=self.pxscale,ang_legend=True,show_center=True)
         
                         elif self.model[i]=='LOCI':
-                            print("LOCI estimation") 
-                            residuals_cube_,frame_fin=loci_adisdi(self.cube[j], self.pa[j],self.scale_list[j], fwhm=self.fwhm,asize=self.asize[i],radius_int=self.minradius, n_segments=int(self.nsegments[i][0,j]),tol=self.tolerance[i][0,j], nproc=self.ncore, optim_scale_fact=2,delta_rot=self.delta_rot[i][0,j],delta_sep=self.delta_sep[i][0,j],verbose=False,full_output=True)
+                            if verbose:
+                                print("LOCI estimation") 
+                            residuals_cube_,frame_fin=loci_adisdi(self.cube[j], self.pa[j],self.scale_list[j], fwhm=self.fwhm,asize=self.asize[i],radius_int=self.minradius, radius_out=self.maxradius, n_segments=int(self.nsegments[i][0,j]),tol=self.tolerance[i][0,j], nproc=self.ncore, optim_scale_fact=2,delta_rot=self.delta_rot[i][0,j],delta_sep=self.delta_sep[i][0,j],verbose=False,full_output=True)
                             if showplot:
                                 plot_frames(frame_fin,title='LOCI', colorbar=True,ang_scale=True, axis=False,pxscale=self.pxscale,ang_legend=True,show_center=True)
                 
                         elif self.model[i]=='KLIP':
-                            print("KLIP estimation") 
-                            cube_out, residuals_cube_, frame_fin = KLIP(self.cube[j], self.pa[j], ncomp=self.ncomp[i][0,j], fwhm=self.fwhm, asize=self.asize[i], 
+                            if verbose:
+                                print("KLIP estimation") 
+                            cube_out, residuals_cube_, frame_fin = KLIP(self.cube[j], self.pa[j], ncomp=self.ncomp[i][0,j], fwhm=self.fwhm, asize=self.asize[i],radius_int=self.minradius, radius_out=self.maxradius, 
                                       delta_rot=self.delta_rot[i][0,j],full_output=True,verbose=False)
                             if showplot:
                                 plot_frames(frame_fin,title='KLIP', colorbar=True,ang_scale=True, axis=False,pxscale=self.pxscale,ang_legend=True,show_center=True)
@@ -1316,46 +1351,64 @@ class PyRSM:
                     
         
                     if self.model[i]=='FM KLIP' or self.model[i]=='FM LOCI':
-                        max_rad=self.max_r+1
+                        max_rad=np.min([self.max_r+1,self.maxradius+1])
                     else:
                         max_rad=self.maxradius+1
                     like_temp=np.zeros(((residuals_cube_.shape[0]+1),residuals_cube_.shape[1],residuals_cube_.shape[2],len(self.interval[i][0,j]),2,self.crop_range[i]))    
 
-                    X_shape=residuals_cube_.shape
-                    X = RawArray('d', int(np.prod(X_shape)))
-                    X_np = np.frombuffer(X).reshape(X_shape)
-                    np.copyto(X_np, residuals_cube_)
-                     
 
-                    time_out=10/250*residuals_cube_.shape[0]*max_rad
-                    results=[]    
-                    pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
-                    for e in range(self.minradius,max_rad):
-                        results.append(pool.apply_async(self.likelihood,args=(e,j,i,0,None,True)))
-                    [result.wait(timeout=time_out) for result in results]
-                    
-                    it=self.minradius
-                    for result in results:
-                        try:
-                            res=result.get(timeout=1)
+                    if self.ncore==1:
+            
+                        for e in range(self.minradius,max_rad):
+                            res=self.likelihood(e,j,i,residuals_cube_,None,verbose)
+
                             indicesy,indicesx=get_time_series(self.cube[0],res[0])
                             if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
                                 like_temp[:,indicesy,indicesx,:,:,:]=res[1]
-                                self.psf_fm[j][i][res[0]]=res[2]
-                            else:
-                                like_temp[:,indicesy,indicesx,:,:,:]=res[1]  
-                        except mp.TimeoutError:
-                            pool.terminate()
-                            pool.join()
-                            res=self.likelihood(it,j,i,residuals_cube_,None,True)
-                            indicesy,indicesx=get_time_series(self.cube[0],res[0])
-                            if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
-                                like_temp[:,indicesy,indicesx,:,:,:]=res[1]
-                                self.psf_fm[j][i][res[0]]=res[2] 
+                                #self.psf_fm[j][i][res[0]]=res[2]
                             else:
                                 like_temp[:,indicesy,indicesx,:,:,:]=res[1] 
-                        it+=1       
-                    
+                    else:
+                        
+                        X_shape=residuals_cube_.shape
+                        X = RawArray('d', int(np.prod(X_shape)))
+                        X_np = np.frombuffer(X).reshape(X_shape)
+                        np.copyto(X_np, residuals_cube_)
+                         
+                        #Sometimes the parallel computation get stuck, to avoid that we impose a maximum computation
+                        #time of 0.05 x number of frame x number of pixels in the last annulus x 2 x pi (0.05 second
+                        #per treated pixel)
+                        time_out=0.05*residuals_cube_.shape[0]*2*max_rad**np.pi
+                        results=[]    
+                        pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
+                        for e in range(self.minradius,max_rad):
+                            results.append(pool.apply_async(self.likelihood,args=(e,j,i,0,None,verbose)))
+                        #[result.wait(timeout=time_out) for result in results]
+                        
+                        it=self.minradius
+                        for result in results:
+                            try:
+                                res=result.get(timeout=time_out)
+                                indicesy,indicesx=get_time_series(self.cube[0],res[0])
+                                if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
+                                    like_temp[:,indicesy,indicesx,:,:,:]=res[1]
+                                    #self.psf_fm[j][i][res[0]]=res[2]
+                                else:
+                                    like_temp[:,indicesy,indicesx,:,:,:]=res[1]  
+                            except mp.TimeoutError:
+                                time_out=0.1
+                                pool.terminate()
+                                pool.join()
+                                res=self.likelihood(it,j,i,residuals_cube_,None,False)
+                                indicesy,indicesx=get_time_series(self.cube[0],res[0])
+                                if self.model[i]=='FM LOCI' or self.model[i]=='FM KLIP':
+                                    like_temp[:,indicesy,indicesx,:,:,:]=res[1]
+                                    #self.psf_fm[j][i][res[0]]=res[2] 
+                                else:
+                                    like_temp[:,indicesy,indicesx,:,:,:]=res[1] 
+                            it+=1 
+                        pool.close()
+                        pool.join()
                     like=[]
                     SNR_FMMF=[]
     
@@ -1384,7 +1437,6 @@ class PyRSM:
             prob_fin=np.zeros((2,obs.shape[1]))
             prob_pre_fw=0
             prob_pre_bw=0
-            lik=0
             
             for i in range(obs.shape[1]):
                 if obs[:,i].sum()!=0:
@@ -1411,9 +1463,6 @@ class PyRSM:
                         
                     prob_pre_bw=prob_bw[:,j]
     
-            scalefact_fw_tot=(scalefact_fw).sum()                
-            scalefact_bw_tot=(scalefact_bw).sum()
-    
     
             for k in range(obs.shape[1]):
                 if (prob_fw[:,k]*prob_bw[:,k]).sum()==0:
@@ -1421,9 +1470,7 @@ class PyRSM:
                 else:
                     prob_fin[:,k]=(prob_fw[:,k]*prob_bw[:,k])/(prob_fw[:,k]*prob_bw[:,k]).sum()
     
-            lik = scalefact_fw_tot+scalefact_bw_tot
-    
-            return prob_fin, lik
+            return prob_fin
     
     
         def RSM_esti(obs,Trpr,prob_ini):
@@ -1431,24 +1478,19 @@ class PyRSM:
             #Original RSM approach involving a forward two-states Markov chain to compute the probabilities
     
             prob_fin=np.zeros((2,obs.shape[1]))
-            prob_pre=0
-            lik=0
+            prob_pre=prob_ini
     
             for i in range(obs.shape[1]):
                 if obs[:,i].sum()!=0:
-                    if i==0:
-                        cf=obs[:,i]*np.dot(Trpr,prob_ini)
-                    else:
-                        cf=obs[:,i]*np.dot(Trpr,prob_pre)
+                    cf=obs[:,i]*np.dot(Trpr,prob_pre)
         
-                    f=sum(cf)            
-                    lik+=np.log(f)
-                    prob_fin[:,i]=cf/f
+                    prob_fin[:,i]=cf/sum(cf)
                     prob_pre=prob_fin[:,i]
                 else:
-                    prob_fin[:,i]=np.nan
+                    prob_fin[:,i]=[1,0]
+                    prob_pre=prob_fin[:,i]
     
-            return prob_fin, lik
+            return prob_fin
     
         probmap = np.zeros((like_cube.shape[0],like_cube.shape[1],like_cube.shape[2]))
         ceny, cenx = frame_center(like_cube[0,:,:,0,0])
@@ -1473,16 +1515,13 @@ class PyRSM:
         cf=np.zeros((2,len(indicesy)*like_cube.shape[0],like_cube.shape[3]))
         totind=0
         for i in range(0,len(indicesy)):
-
-            poscenty=indicesy[i]
-            poscentx=indicesx[i]
                 
             for j in range(0,like_cube.shape[0]):        
 
                     for m in range(0,like_cube.shape[3]):
                         
-                        cf[0,totind,m]=like_cube[j,poscenty,poscentx,m,0]
-                        cf[1,totind,m]=like_cube[j,poscenty,poscentx,m,1]
+                        cf[0,totind,m]=like_cube[j,indicesy[i],indicesx[i],m,0]
+                        cf[1,totind,m]=like_cube[j,indicesy[i],indicesx[i],m,1]
                     totind+=1
                     
         #Computation of the probability cube via the regime switching framework
@@ -1491,13 +1530,12 @@ class PyRSM:
         lik_fin=[]
         for n in range(like_cube.shape[3]):
             if estimator=='Forward':
-                prob_fin_temp,lik_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
+                prob_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
             elif estimator=='Forward-Backward':
-                prob_fin_temp,lik_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
-
+                prob_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
 
             prob_fin.append(prob_fin_temp)
-            lik_fin.append(lik_fin_temp)
+
         
         cub_id1=0   
         for i in range(0,len(indicesy)):
@@ -1597,6 +1635,8 @@ class PyRSM:
                         like_cube=np.append(like_cube,np.repeat(self.like_fin[sel_cube[i][0]][sel_cube[i][1]][int(sel_crop[i])],len(self.interval[sel_cube[i][1]][0,sel_cube[i][0]]),axis=3),axis=0)
                     else:
                         like_cube=np.append(like_cube,self.like_fin[sel_cube[i][0]][sel_cube[i][1]][int(sel_crop[i])],axis=0) 
+
+        
         n,y,x,l_int,r_n =like_cube.shape 
 
 
@@ -1605,31 +1645,45 @@ class PyRSM:
             indicesy,indicesx=get_time_series(self.cube[0],ann_center)
             probmap[:,indicesy,indicesx]=self.likfcn(ann_center,like_cube,estimator,ns)[0]
         else:
-            X_shape=like_cube.shape
-            X = RawArray('d', int(np.prod(X_shape)))
-            X_np = np.frombuffer(X).reshape(X_shape)
-            np.copyto(X_np, like_cube)
-               
-            time_out=5/250*like_cube.shape[0]*self.maxradius
-            results=[]    
-            pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
-            for e in range(self.minradius,self.maxradius+1):
-                results.append(pool.apply_async(self.likfcn,args=(e,0,estimator,ns)))
-            [result.wait(timeout=time_out) for result in results]
             
-            it=self.minradius
-            for result in results:
-                try:
-                    res=result.get(timeout=1)
-                    indicesy,indicesx=get_time_series(self.cube[0],res[1])
-                    probmap[:,indicesy,indicesx]=res[0]
-                except mp.TimeoutError:
-                    pool.terminate()
-                    pool.join()
-                    res=self.likfcn,args=(it,like_cube,estimator,ns)
-                    indicesy,indicesx=get_time_series(self.cube[0],res[1])
-                    probmap[:,indicesy,indicesx]=res[0]
-                it+=1       
+            if self.ncore!=1:
+                X_shape=like_cube.shape
+                X = RawArray('d', int(np.prod(X_shape)))
+                X_np = np.frombuffer(X).reshape(X_shape)
+                np.copyto(X_np, like_cube)
+                 
+                #Sometimes the parallel computation get stuck, to avoid that we impose a maximum computation
+                #time of 0.01 x number of frame x number of pixels iin the last annulus x 2 x pi (0.01 second
+                #per treated pixel)
+                time_out=0.01*like_cube.shape[0]*2*self.maxradius*np.pi
+                results=[]    
+                pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
+                for e in range(self.minradius,self.maxradius+1):
+                    results.append(pool.apply_async(self.likfcn,args=(e,0,estimator,ns)))
+                #[result.wait(timeout=time_out) for result in results]
+                
+                it=self.minradius
+                for result in results:
+                    try:
+                        res=result.get(timeout=time_out)
+                        indicesy,indicesx=get_time_series(self.cube[0],res[1])
+                        probmap[:,indicesy,indicesx]=res[0]
+                        
+                    except mp.TimeoutError:
+                        time_out=0.1
+                        pool.terminate()
+                        pool.join()
+                        res=self.likfcn(it,like_cube,estimator,ns)
+                        indicesy,indicesx=get_time_series(self.cube[0],res[1])
+                        probmap[:,indicesy,indicesx]=res[0]
+                       
+                    it+=1
+                pool.close()
+                pool.join()
+            else:
+                 for e in range(self.minradius,self.maxradius+1):
+                     indicesy,indicesx=get_time_series(self.cube[0],e)
+                     probmap[:,indicesy,indicesx]=self.likfcn(e,like_cube,estimator,ns)[0]
             
             
         if colmode == 'mean':
@@ -1641,7 +1695,221 @@ class PyRSM:
         elif colmode == 'max':
             self.probmap= np.max(probmap, axis=0)
             
-               
+            
+    def opti_bound_sel(self): 
+        
+        
+        """
+        Function providing the optimal upper bound for the number of principal components (APCA, NMF, KLIP),
+         and for the rank (LLSG) to be considered during the optimisation procedure (self.opti_model()). 
+         The upper bound is defined as the principal component/rank associated to the highest contrast 
+         (averaged over multiple angular separations). This definition allows to consider the range
+         of values for which a change in the speckle noise treatment by the PSF-subtraction
+         techniques is observable. The obtained upper bound is saved in self.opti_bound[model][cube][1].
+         The obtained range self.opti_bound[model][cube][0:1] can then be divided in multiple subranges
+         allowing to increase the diversity when computing the final detection map, allowing to increase
+         the RSM map performance. This should help cancelling potential bright speckles as their evolution
+         is driven by the number of principal components/rank used to generate the reference PSF, while the
+         potential astrophysical signal should not evolve sensibly. The curves providing the evolution of 
+         the averaged contrast with the number of principal components/rank is provided by 
+         self.snr_combined_evolution[model][cube].
+    
+        """
+        
+        self.opti=True
+        if self.inv_ang==True:
+            for n in range(len(self.cube)):
+                self.pa[n]=-self.pa[n]
+
+        self.opti_theta=np.zeros((len(self.cube),self.maxradius+5))
+                
+        for c in range(len(self.cube)):
+                    
+            for m in range(len(self.model)):
+                self.param=[c,m,0]
+                if self.model[m]!='LOCI' or self.model[m]!='FM LOCI':
+                    
+                    if self.model[m]=='FM KLIP' or self.model[m]=='FM LOCI':
+                        max_rad=self.max_r+1
+                    else:
+                        max_rad=self.maxradius+1
+                        
+                    # Determination of the considered angular distances for the optimization process
+                       
+                    if self.opti_mode=='full-frame':
+                        if self.trunc is not None:
+                            max_rad=min(self.trunc*self.asize[m],max_rad)
+                        if max_rad>self.minradius+3*self.asize[m]+self.asize[m]//2:
+                            range_sel = list(range(self.minradius+self.asize[m]//2,self.minradius+3*self.asize[m]+self.asize[m]//2,self.asize[m]))
+                            if max_rad>self.minradius+7*self.asize[m]:
+                                range_sel.extend(list(range(self.minradius+3*self.asize[m]+self.asize[m]//2,self.minradius+7*self.asize[m],2*self.asize[m])))
+                                range_sel.extend(list(range(self.minradius+7*self.asize[m]+self.asize[m]//2,max_rad-3*self.asize[m]//2-1,4*self.asize[m])))
+                                range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[m]*self.asize[m]-self.asize[m]//2-1)
+                            else:
+                                range_sel.extend(list(range(self.minradius+3*self.asize[m]+self.asize[m]//2,max_rad-self.asize[m]//2,2*self.asize[m])))
+                                if max_rad==self.minradius+7*self.asize[m]:
+                                    range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[m]*self.asize[m]-self.asize[m]//2-1)
+                        else:
+                            range_sel=list(range(self.minradius+self.asize[m]//2,max_rad-self.asize[m]//2,self.asize[m]))
+                    elif self.opti_mode=='annular':
+                        range_sel=range(self.minradius+self.asize[m]//2,max_rad-self.asize[m]//2,self.asize[m])
+                    
+                    for i in range_sel:  
+                            
+                            indicesy,indicesx=get_time_series(self.cube[c],i)
+                            cube_derot,angle_list,scale_list=rot_scale('ini',self.cube[c],None,self.pa[c],self.scale_list[c], self.imlib, self.interpolation)  
+                            cube_derot=rot_scale('fin',self.cube[c],cube_derot,angle_list,scale_list, self.imlib, self.interpolation)
+                            apertures = photutils.CircularAperture(np.array((indicesx, indicesy)).T, round(self.fwhm/2))
+                            fluxes = photutils.aperture_photometry(cube_derot.sum(axis=0), apertures)
+                            fluxes = np.array(fluxes['aperture_sum'])
+                            x_sel=indicesx[np.argsort(fluxes)[len(fluxes)//2]]
+                            y_sel=indicesy[np.argsort(fluxes)[len(fluxes)//2]]
+                            
+                            ceny, cenx = frame_center(cube_derot[0])
+                            
+                            self.opti_theta[c,i]=np.degrees(np.arctan2(y_sel-ceny, x_sel-cenx))
+        
+                    if self.model[m]=='APCA' or self.model[m]=='KLIP' or self.model[m]=='FM KLIP':
+                
+                        step=4
+                        
+                    elif self.model[m]=='NMF':
+                        
+                        step=2
+                        
+                    elif self.model[m]=='LLSG':
+                        
+                        step=1
+                        
+                    snr_mean_evolution=np.zeros(len(range(self.opti_bound[m][0][0],self.opti_bound[m][0][1],step)))
+            
+                            
+                    for l in range_sel: 
+                        
+                        self.param[2]=l
+                        cuben=self.param[0]
+                        modn=self.param[1]
+                        ann_center=self.param[2]
+                        
+                        mean_snr=[] 
+                        flux_temp=[]
+                        
+        
+                        
+                        for j in range(self.opti_bound[m][0][0],self.opti_bound[m][0][1],step):
+                            
+                            if self.model[modn]=='APCA':
+                        
+                                param=[j,self.nsegments[modn][ann_center,cuben],self.delta_rot[modn][ann_center,cuben]]
+                                
+                            elif self.model[modn]=='NMF':
+                                
+                                param=j
+                                
+                            elif self.model[modn]=='LLSG':
+                                
+                                param=[j,self.nsegments[modn][ann_center,cuben]]
+                                
+                            elif self.model[modn]=='KLIP' or self.model[modn]=='FM KLIP':
+                        
+                               param=[j,self.delta_rot[modn][ann_center,cuben]]
+                            
+                            
+                            flux_temp.append(self.contrast_esti(param)[1])
+                        
+                        
+                        flux_mean=np.median(flux_temp)
+                        
+                        for j in range(self.opti_bound[m][0][0],self.opti_bound[m][0][1],step):
+            
+                        
+                            if self.model[modn]=='APCA':
+                        
+                                self.ncomp[modn][ann_center,cuben]=j
+        
+                        
+                            elif self.model[modn]=='NMF':
+                                
+                                self.ncomp[modn][ann_center,cuben]=j
+                                
+                        
+                            elif self.model[modn]=='LLSG':
+                                
+                                self.rank[modn][ann_center,cuben]=j
+                     
+                                
+                            elif self.model[modn]=='KLIP' or self.model[modn]=='FM KLIP':
+                        
+                                self.ncomp[modn][ann_center,cuben]=j
+        
+                                
+                            psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
+                                  
+                            ceny, cenx = frame_center(self.cube[cuben])
+                            fcy=[]
+                            fcx=[]
+                            cube_fc =self.cube[cuben]
+                            ang_fc=range(int(self.opti_theta[cuben,ann_center]),int(360+self.opti_theta[cuben,ann_center]),int(360))
+                            for i in range(len(ang_fc)):
+                                cube_fc = cube_inject_companions(cube_fc, psf_template,
+                                                     self.pa[cuben], flux_mean, self.pxscale,
+                                                     rad_dists=ann_center,
+                                                     theta=ang_fc[i],
+                                                     verbose=False)
+                                y = int(ceny) + ann_center * np.sin(np.deg2rad(
+                                                                       ang_fc[i]))
+                                x = int(cenx) + ann_center * np.cos(np.deg2rad(
+                                                                       ang_fc[i]))
+                        
+                                fcy.append(y)
+                                fcx.append(x)
+                        
+                            
+                            frame_fc=self.model_esti(modn,cuben,ann_center,cube_fc)[0]
+                            
+                            max_detect=[]
+                            for i in range(len(ang_fc)):
+                        
+                        
+                                indc = disk((fcy[i], fcx[i]),int(self.fwhm/2)+1)
+                                
+                                indices=get_annulus_segments(cube_fc[0], ann_center,1,1)
+                            
+                                snr_fwhm=[]
+                               
+                                for k in range(len(indc[0])):
+                                    
+                                    if len(np.intersect1d(np.where(indices[0][0]==indc[0][k])[0],np.where(indices[0][1]==indc[1][k])[0]))==1:
+                                        
+                                        snr_fwhm.append(vip.metrics.snr(frame_fc, (indc[1][k],indc[0][k]),self.fwhm))
+                                
+                                max_detect.append(max(snr_fwhm))
+                           
+                            mean_snr.append(np.mean(max_detect))
+                            
+                            
+                        self.snr_evolution[m][l,c]=[mean_snr]
+                        snr_mean_evolution+=mean_snr
+                        
+
+                    self.snr_combined_evolution[m][c]= [snr_mean_evolution/len(range_sel)] 
+                    
+                    snr_diff=np.diff(np.round(snr_mean_evolution/(10*len(range_sel)),1))
+                    sum_snr_diff=[]
+                    for n in range(len(snr_diff)):
+                        sum_snr_diff.append(abs(snr_diff[n:len(snr_diff)]).sum()) 
+                        
+                    if len(np.where(np.asarray(sum_snr_diff)==0)[0])>=1:
+                        
+                        self.opti_bound[m][c][1]=(np.where(np.asarray(sum_snr_diff)==0)[0][0]+2)*step+self.opti_bound[m][0][0] #+1 because of np.diff and +1 as it starts at 0
+
+                    else:
+                        
+                        self.opti_bound[m][c][1]=(np.argmax(snr_mean_evolution)+1)*step+self.opti_bound[m][0][0]
+
+        if self.inv_ang==True:
+            for n in range(len(self.cube)):
+                self.pa[n]=-self.pa[n]                        
         
     def model_esti(self,modn,cuben,ann_center,cube): 
         
@@ -1734,7 +2002,7 @@ class PyRSM:
             if self.opti_mode=='full-frame':
                 nfr = cube_rot_scale.shape[0]
                 matrix = np.reshape(cube_rot_scale, (nfr, -1))
-                res= NMF_patch(matrix, ncomp=self.ncomp[modn][ann_center,cuben], max_iter=100,random_state=None,sklearn=True)
+                res= NMF_patch(matrix, ncomp=self.ncomp[modn][ann_center,cuben], max_iter=5000,random_state=None)
                 resicube=np.reshape(res,(cube_rot_scale.shape[0],cube_rot_scale.shape[1],cube_rot_scale.shape[2]))
             else:
                 if scale_list is not None:
@@ -1827,8 +2095,8 @@ class PyRSM:
         frame_nofc=self.model_esti(modn,cuben,ann_center,self.cube[cuben])[0]
             
         psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
-        if self.cube[cuben].ndim==4:
-            psf_template =np.stack([psf_template]*self.cube[cuben].shape[0])
+
+
         
         # Noise computation using the approach proposed by Mawet et al. (2014)
         
@@ -1857,7 +2125,7 @@ class PyRSM:
         sigma_corr = stats.t.ppf(stats.norm.cdf(5), n_aper)*ss_corr
         noise = np.std(fluxes)
         
-        flux = sigma_corr*noise
+        flux = sigma_corr*noise*2
         fc_map = np.ones((self.cube[cuben].shape[-1],self.cube[cuben].shape[-1])) * 1e-6
         fcy=[]
         fcx=[]
@@ -1877,7 +2145,7 @@ class PyRSM:
             x = int(cenx) + ann_center * np.cos(np.deg2rad(
                                                    ang_fc[i]))
             if self.cube[cuben].ndim==4:
-                fc_map = frame_inject_companion(fc_map, psf_template[0], y, x,
+                fc_map = frame_inject_companion(fc_map, np.mean(psf_template,axis=0), y, x,
                                             flux)
             else:
                 fc_map = frame_inject_companion(fc_map, psf_template, y, x,
@@ -1896,8 +2164,7 @@ class PyRSM:
             recovered_flux = photutils.aperture_photometry((frame_fc - frame_nofc), apertures)['aperture_sum']
             throughput = float(recovered_flux / injected_flux)
     
-            
-            if flux/throughput>0:
+            if throughput>0:
                 contrast.append(flux / throughput)
                 
         if len(contrast)!=0:
@@ -1936,7 +2203,7 @@ class PyRSM:
 
     
     
-    def bayesian_optimisation(self,n_iters, loss_function, bounds,param_type, prev_res=None, n_random_esti=40, random_search=100 ,ncore=1):
+    def bayesian_optimisation(self, loss_function, bounds,param_type, prev_res=None, opti_param={'opti_iter':15,'ini_esti':10, 'random_search':100} ,ncore=1):
 
         """ bayesian_optimisation
         Uses Gaussian Processes to optimise the loss function `loss_function`.
@@ -1944,8 +2211,6 @@ class PyRSM:
         Parameters
         ----------
         
-            n_iters: integer.
-                Number of iterations used for the Bayesian optimization.
             loss_loss: function.
                 Function to be optimised, in our case the contrast_esti function.
             bounds: numpy ndarray, 2d
@@ -1958,12 +2223,15 @@ class PyRSM:
                 Parmater sets and corresponding average contrasts generated at the previous 
                 angular distance. Allow to smooth the transition from one annulus to another 
                 during the optimization process for the annular mode
-            n_random_esti: int, optional
-                Number of sets of parameters for which the loss function is computed to
-                initialize the Gaussian process. Default is 40.
-            random_search: int, optional
-                Number of random searches for the selection of the next set of parameters to 
-                sample based on the maximisation of the expected immprovement. Default is 100.
+            param_optimisation: dict, optional
+                Dictionnary regrouping the parameters used by the Bayesian. 'opti_iter' is the number of
+                iterations,'ini_esti' number of sets of parameters for which the loss function is computed
+                to initialize the Gaussian process, random_search the number of random searches for the
+                selection of the next set of parameters to sample based on the maximisation of the 
+                expected immprovement. Default is {'opti_iter':15,'ini_esti':10, 'random_search':100}
+            ncore : int, optional
+                Number of processes for parallel computing. By default ('ncore=1') 
+                the algorithm works in single-process mode. 
         """
 
         
@@ -2003,9 +2271,9 @@ class PyRSM:
                 params_m=[]
                 for i in range(len(param_type)):
                     if param_type[i]=='int':
-                        params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+                        params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
                     else:
-                        params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+                        params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
                         
                 if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
                     max_rad=self.max_r+1
@@ -2059,9 +2327,9 @@ class PyRSM:
             params_m=[]
             for i in range(len(param_type)):
                 if param_type[i]=='int':
-                    params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+                    params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
                 else:
-                    params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+                    params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
                     
                     
             res_param = pool_map(ncore, loss_function, iterable(np.array(params_m).T))
@@ -2118,9 +2386,9 @@ class PyRSM:
             
             if self.opti_mode=='full-frame':
                 it2=0
-                flux_fin=np.zeros((len(range_sel),n_iters))
+                flux_fin=np.zeros((len(range_sel),opti_param['opti_iter']))
             
-            for n in range(n_iters):
+            for n in range(opti_param['opti_iter']):
                 if len(x_fin)>0:
                     x_cop.append(x_fin[-1])
                     y_cop.append(y_fin[-1])
@@ -2130,19 +2398,27 @@ class PyRSM:
         
                 # Selection of next parameter set via maximisation of the expected improvement
                 
-                if random_search:
+                if opti_param['random_search']:
                     x_random=[]
                     for i in range(len(param_type)):
                         if param_type[i]=='int':
-                            x_random.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (random_search)))
+                            x_random.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (opti_param['random_search'])))
                         else:
-                            x_random.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (random_search)))
+                            x_random.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (opti_param['random_search'])))
                             
                     x_random=np.array(x_random).T
                     ei = -1 * expected_improvement(x_random, model, y_i, space_dim=space_dim) 
                     params_m = x_random[np.argmax(ei), :]
                     
-                       
+                    # Duplicates break the GP
+                    if any(np.abs(params_m - x_ini).sum(axis=1) > 1e-10):
+            
+                        for i in range(len(param_type)):
+                            if param_type[i]=='int':
+                                params_m[i]=np.random.random_integers(bounds[i, 0], bounds[i, 1],1)
+                            else:
+                                params_m[i]=np.random.uniform(bounds[i, 0], bounds[i, 1], 1)
+                                
                 if self.opti_mode=='full-frame':
                     it1=0
                     y_fin_temp=[]
@@ -2187,9 +2463,261 @@ class PyRSM:
  
         return param_f[optires.index(max(optires))],max(optires), [x_ini, y_ini],flux_f[optires.index(max(optires))]
     
+    def pso_optimisation(self, loss_function, bounds,param_type, prev_res=None, opti_param={'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10,'opti_iter':15,'ini_esti':10} ,ncore=1):
+
+        """ bayesian_optimisation
+        Uses Gaussian Processes to optimise the loss function `loss_function`.
+        
+        Parameters
+        ----------
+        
+            loss_loss: function.
+                Function to be optimised, in our case the contrast_esti function.
+            bounds: numpy ndarray, 2d
+                Lower and upper bounds of the parameters used to compute the cube of
+                residuals allowing the estimation of the average contrast.
+            param_type: list
+                Type of parameters used by the PSF-subtraction technique to compute the cube
+                of residuals allowing the estimation of the average contrast ('int' or 'float')
+            prev_res: None or numpy ndarray, 2d
+                Parmater sets and corresponding average contrasts generated at the previous 
+                angular distance. Allow to smooth the transition from one annulus to another 
+                during the optimization process for the annular mode
+            param_optimisation: dict, optional
+                Dictionnary regrouping the parameters used by the PSO optimization
+                framework. 'w' is the inertia factor, 'c1' is the cognitive factor and
+                'c2' is the social factor, 'n_particles' is the number of particles in the
+                swarm (number of point tested at each iteration), 'opti_iter' the number of
+                iterations,'ini_esti' number of sets of parameters for which the loss
+                function is computed to initialize the PSO. {'c1': 1, 'c2': 1, 'w':0.5,
+                'n_particles':10,'opti_iter':15,'ini_esti':10}
+            ncore : int, optional
+                Number of processes for parallel computing. By default ('ncore=1') 
+                the algorithm works in single-process mode. 
+        """
+
+        if prev_res==None:
+            x_ini = []
+            y_ini = []
+        else:
+            x_ini = prev_res[0]
+            y_ini = prev_res[1]
+            
+        ann_center=self.param[2]
+        modn=self.param[1]
+        cuben=self.param[0]
+
+        
+        if self.opti_mode=='full-frame':
+                params_m=[]
+                for i in range(len(param_type)):
+                    if param_type[i]=='int':
+                        params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
+                    else:
+                        params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
+                        
+                if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
+                    max_rad=self.max_r+1
+                else:
+                    max_rad=self.maxradius+1
+                    
+                # Determination of the considered angular distances for the optimization process
+                
+                if self.trunc is not None:
+                    max_rad=min(self.trunc*self.asize[modn],max_rad)
+                if max_rad>self.minradius+3*self.asize[modn]+self.asize[modn]//2:
+                    range_sel = list(range(self.minradius+self.asize[modn]//2,self.minradius+3*self.asize[modn]+self.asize[modn]//2,self.asize[modn]))
+                    if max_rad>self.minradius+7*self.asize[modn]:
+                        range_sel.extend(list(range(self.minradius+3*self.asize[modn]+self.asize[modn]//2,self.minradius+7*self.asize[modn],2*self.asize[modn])))
+                        range_sel.extend(list(range(self.minradius+7*self.asize[modn]+self.asize[modn]//2,max_rad-3*self.asize[modn]//2-1,4*self.asize[modn])))
+                        range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[modn]*self.asize[modn]-self.asize[modn]//2-1)
+                    else:
+                        range_sel.extend(list(range(self.minradius+3*self.asize[modn]+self.asize[modn]//2,max_rad-self.asize[modn]//2,2*self.asize[modn])))
+                        if max_rad==self.minradius+7*self.asize[modn]:
+                            range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[modn]*self.asize[modn]-self.asize[modn]//2-1)
+                else:
+                    range_sel=list(range(self.minradius+self.asize[modn]//2,max_rad-self.asize[modn]//2,self.asize[modn]))
+            
+                
+                for j in range_sel:
+                    
+                    self.param[2]=j       
+                    res_param = pool_map(ncore, loss_function, iterable(np.array(params_m).T))
+
+                    res_mean_temp=[]
+                    for res_temp in res_param:
+                        res_mean_temp.append(1/res_temp[0])
+                    self.mean_opti[cuben,modn,j]=np.mean(np.asarray(res_mean_temp))
+                    
+                    y_ini_temp=[]
+                    for res_temp in res_param:
+                        if j==self.minradius+self.asize[modn]//2:
+                            x_ini.append(res_temp[2])
+                        y_ini_temp.append((1/res_temp[0])/self.mean_opti[cuben,modn,j])
 
 
-    def opti_model(self,maxiter=60,filt=True):
+                    y_ini.append([y_ini_temp])
+                    print(self.model[modn]+' PSO process initialization: annulus {} done!'.format(j))                  
+                y_ini=list(np.asarray(y_ini).sum(axis=0))
+
+        else:
+
+            self.param[2]=ann_center
+            params_m=[]
+            for i in range(len(param_type)):
+                if param_type[i]=='int':
+                    params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
+                else:
+                    params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (opti_param['ini_esti'])))
+                    
+                    
+            res_param = pool_map(ncore, loss_function, iterable(np.array(params_m).T))
+            
+            res_mean_temp=[]
+            for res_temp in res_param:
+                res_mean_temp.append(1/res_temp[0])
+            self.mean_opti[cuben,modn,self.param[2]]=np.mean(np.asarray(res_mean_temp))
+                    
+            for res_temp in res_param:
+                if res_temp[0].prod()>0:
+                    if prev_res is not None:
+                        del x_ini[0]
+                        del y_ini[0]
+                    x_ini.append(res_temp[2])
+                    y_ini.append((1/res_temp[0])/self.mean_opti[cuben,modn,self.param[2]])
+                    
+
+        # Initialization of the PSO algorithm
+        x_i=np.array(x_ini)
+        
+        my_topology = Star() # The Topology Class
+        my_options_start={'c1': opti_param['c1'], 'c2': opti_param['c2'], 'w':opti_param['w']}
+        my_options_end = {'c1': opti_param['c1'], 'c2': opti_param['c2'], 'w': opti_param['w']}
+                
+        param_f=[]
+        flux_f=[]
+        optires=[]
+        if self.param_opti_mode=='Contrast':
+            crop_r=1
+        else:
+            crop_r=self.crop_range[self.param[1]]
+            self.crop_range[self.param[1]]=1
+        for j in range(crop_r):
+        
+            params_m=[]
+            self.param[2]=ann_center
+            
+            if self.opti_mode=='full-frame':
+                if self.param_opti_mode=='Contrast':
+                    y_i=y_ini[0]
+                else:
+                    y_i=y_ini[0][:,j]
+            else:               
+                if self.param_opti_mode=='Contrast':
+                    y_i=np.array(np.array(y_ini))
+                else:
+                    y_i=np.array(np.array(y_ini)[:,j])
+            #print(y_i)
+            ini_position=x_i[y_i<=np.sort(y_i)[opti_param['n_particles']-1],:]
+            my_swarm = P.create_swarm(n_particles=opti_param['n_particles'], dimensions=bounds.shape[0], options=my_options_start, bounds=(list(bounds.T[0]),list(bounds.T[1])),init_pos=ini_position)
+            my_swarm.bounds=(list(bounds.T[0]),list(bounds.T[1]))
+            my_swarm.velocity_clamp=None
+            my_swarm.vh=P.handlers.VelocityHandler(strategy="unmodified")
+            my_swarm.bh=P.handlers.BoundaryHandler(strategy="periodic")
+            my_swarm.current_cost=y_i[y_i<=np.sort(y_i)[opti_param['n_particles']-1]]
+            my_swarm.pbest_cost = my_swarm.current_cost  
+            
+            iterations = opti_param['opti_iter']
+            
+            for n in range(iterations):
+
+                y_i=[]
+                # Part 1: Update personal best
+                if n!=0:
+                           
+                    if self.opti_mode=='full-frame':
+                        
+                        for j in range_sel:
+                            
+                            self.param[2]=j       
+                            res_param = pool_map(ncore, loss_function, iterable(np.array(my_swarm.position)))
+                            
+                            res_mean_temp=[]
+                            for res_temp in res_param:
+                                res_mean_temp.append(1/res_temp[0])
+                            
+                            self.mean_opti[cuben,modn,j]=np.mean(np.asarray(res_mean_temp))
+                            
+                            y_ini_temp=[]
+                            for res_temp in res_param:
+                                y_ini_temp.append((1/res_temp[0])/self.mean_opti[cuben,modn,j])
+                            
+                            y_i.append([y_ini_temp])
+                            
+                        my_swarm.current_cost=np.asarray(y_i).sum(axis=0)[0]
+                        #print(my_swarm.position,np.asarray(y_i).sum(axis=0)[0])    
+                    else:
+                        self.param[2]=ann_center
+     
+                        res_param = pool_map(ncore, loss_function, iterable(np.array(my_swarm.position)))
+                        
+                        res_mean_temp=[]
+                        for res_temp in res_param:
+                            res_mean_temp.append(1/res_temp[0])
+                        self.mean_opti[cuben,modn,self.param[2]]=np.mean(np.asarray(res_mean_temp))
+                                
+                        for res_temp in res_param:
+                            if res_temp[0].prod()>0:
+                                if prev_res is not None:
+                                    del x_ini[0]
+                                    del y_ini[0]
+                                x_ini.append(res_temp[2])
+                                y_ini.append((1/res_temp[0])/self.mean_opti[cuben,modn,self.param[2]])
+                                y_i.append((1/res_temp[0])/self.mean_opti[cuben,modn,self.param[2]])
+                                
+                        my_swarm.current_cost=y_i
+                
+               
+                my_swarm.pbest_pos, my_swarm.pbest_cost = P.compute_pbest(my_swarm) # Update and store
+    
+                my_swarm.options={'c1': my_options_start['c1']+n*(my_options_end['c1']-my_options_start['c1'])/(iterations-1), 'c2': my_options_start['c2']+n*(my_options_end['c2']-my_options_start['c2'])/(iterations-1), 'w': my_options_start['w']+n*(my_options_end['w']-my_options_start['w'])/(iterations-1)}
+                # Part 2: Update global best
+                # Note that gbest computation is dependent on your topology
+                if np.min(my_swarm.pbest_cost) < my_swarm.best_cost:
+                    my_swarm.best_pos, my_swarm.best_cost = my_topology.compute_gbest(my_swarm)
+    
+                # Let's print our output
+    
+                print('Iteration: {} | Best cost: {}'.format(n+1, my_swarm.best_cost))
+    
+            # Part 3: Update position and velocity matrices
+        # Note that position and velocity updates are dependent on your topology
+                my_swarm.velocity = my_topology.compute_velocity(my_swarm, my_swarm.velocity_clamp, my_swarm.vh, my_swarm.bounds
+                )
+                my_swarm.position = my_topology.compute_position(my_swarm, my_swarm.bounds, my_swarm.bh
+                )
+                
+            if self.opti_mode=='full-frame': 
+                param_f.append(my_swarm.best_pos)
+                flux_f.append(1/my_swarm.best_cost)
+                optires.append(my_swarm.best_cost)    
+            else:   
+                param_f.append(my_swarm.best_pos)
+                flux_f.append(1/my_swarm.best_cost)
+                optires.append(my_swarm.best_cost)
+      
+        if self.param_opti_mode=='RSM': 
+            self.crop[self.param[1]][ann_center,self.param[0]]=self.crop[self.param[1]][ann_center,self.param[0]]+optires.index(max(optires)) *2
+            self.crop_range[self.param[1]]=crop_r
+        
+        if self.opti_mode=='full-frame': 
+            print(self.model[modn]+' Bayesian optimization done!')  
+            
+ 
+        return param_f[optires.index(max(optires))],max(optires), [x_ini, y_ini],flux_f[optires.index(max(optires))]
+
+
+    def opti_model(self,optimisation_model='PSO', param_optimisation={'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10,'opti_iter':15,'ini_esti':10, 'random_search':100},filt=True):
              
         """
         Function allowing the optimization of the PSF-subtraction techniques parameters 
@@ -2197,9 +2725,23 @@ class PyRSM:
         
         Parameters
         ----------
-        maxiter: int, optional
-            Maximum number of iterations of the Bayesian optimization algorithm for 
-            APCA, LOCI, KLIP FM and LOCI FM. Default is 60.
+        optimisation_model: str, optional
+            Approach used for the paramters optimal selection via the maximization of the 
+            contrast for APCA, LOCI, KLIP and KLIP FM. The optimization is done either
+            via a Bayesian approach ('Bayesian') or using Particle Swarm optimization
+            ('PSO'). Default is PSO.
+        param_optimisation: dict, optional
+            dictionnary regrouping the parameters used by the Bayesian or the PSO optimization
+            framework. For the Bayesian optimization we have 'opti_iter' the number of iterations,
+            ,'ini_esti' number of sets of parameters for which the loss function is computed to
+            initialize the Gaussian process, random_search the number of random searches for the
+            selection of the next set of parameters to sample based on the maximisation of the 
+            expected immprovement. For the PSO optimization, 'w' is the inertia factor, 'c1' is
+            the cognitive factor and 'c2' is the social factor, 'n_particles' is the number of
+            particles in the swarm (number of point tested at each iteration), 'opti_iter' the 
+            number of iterations,'ini_esti' number of sets of parameters for which the loss
+            function is computed to initialize the PSO. {'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10
+            ,'opti_iter':15,'ini_esti':10, 'random_search':100}
         filt: True, optional
             If True, a Hampel Filter is applied on the set of parameters for the annular mode
             in order to avoid outliers due to potential bright artefacts.
@@ -2284,18 +2826,22 @@ class PyRSM:
                         param_type=['int','int','float']
         
                         if self.opti_mode=='full-frame':
-
-                            opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100,ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.pso_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
                             self.ncomp[j][:,k]=int(opti_param[0])
-                            self.nsegments[j][:,k]=opti_param[1]
+                            self.nsegments[j][:,k]=int(opti_param[1])
                             self.delta_rot[j][:,k]=opti_param[2] 
                             break
                         else:
-                            opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100, ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.pso_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation, ncore=self.ncore)
+                               
                             self.ncomp[j][i,k]=int(opti_param[0])
-                            self.nsegments[j][i,k]=opti_param[1]
+                            self.nsegments[j][i,k]=int(opti_param[1])
                             self.delta_rot[j][i,k]=opti_param[2] 
                             print('APCA Bayesian optimization: annulus {} done!'.format(i))                  
                        
@@ -2322,8 +2868,7 @@ class PyRSM:
                                 self.param=[k,j,h]
                                 res_param=[]
                                 
-                                for l in param_range:
-                                    res_param.append(self.contrast_esti(l))
+                                res_param = pool_map(self.ncore, self.contrast_esti, iterable(param_range))
                                 
                                 res_mean=[]
                                 for res_temp in res_param:
@@ -2472,15 +3017,19 @@ class PyRSM:
                         param_type=['float','float']
                         
                         if self.opti_mode=='full-frame':
-                            opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100,ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
                             self.tolerance[j][:,k]=opti_param[0]
                             self.delta_rot[j][:,k]=opti_param[1]
 
                             break
                         else:
-                            opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100, ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation, ncore=self.ncore)
                             self.tolerance[j][i,k]=opti_param[0]
                             self.delta_rot[j][i,k]=opti_param[1]
                             print('LOCI Bayesian optimization: annulus {} done!'.format(i))      
@@ -2500,16 +3049,19 @@ class PyRSM:
                         param_type=['float','float']
                         
                         if self.opti_mode=='full-frame':
-
-                            opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                    random_search=100, ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
                             self.tolerance[j][:,k]=opti_param[0]
                             self.delta_rot[j][:,k]=opti_param[1]
 
                             break
                         else:
-                            opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                    random_search=100, ncore=self.ncore)
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
                             self.tolerance[j][i,k]=opti_param[0]
                             self.delta_rot[j][i,k]=opti_param[1]
                             print('FM LOCI Bayesian optimization: annulus {} done!'.format(i))      
@@ -2528,17 +3080,20 @@ class PyRSM:
                         param_type=['int','float']
 
                         if self.opti_mode=='full-frame':
-
-                            opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                    random_search=100, ncore=self.ncore)
-                            self.ncomp[j][:,k]=opti_param[0]
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            self.ncomp[j][:,k]=int(opti_param[0])
                             self.delta_rot[j][:,k]=opti_param[1]
 
                             break
                         else:
-                            opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100,ncore=self.ncore)
-                            self.ncomp[j][i,k]=opti_param[0]
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            self.ncomp[j][i,k]=int(opti_param[0])
                             self.delta_rot[j][i,k]=opti_param[1]
                             print('KLIP Bayesian optimization: annulus {} done!'.format(i))   
                             
@@ -2556,17 +3111,20 @@ class PyRSM:
                         param_type=['int','float']
 
                         if self.opti_mode=='full-frame':
-
-                            opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                     random_search=100, ncore=self.ncore)
-                            self.ncomp[j][:,k]=opti_param[0]
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,range_sel],simures,self.flux_opti[k,j,range_sel]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            self.ncomp[j][:,k]=int(opti_param[0])
                             self.delta_rot[j][:,k]=opti_param[1]
 
                             break
                         else:
-                            opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation(maxiter, self.contrast_esti, bounds,param_type, prev_res=simures, n_random_esti=self.ini_esti[j],
-                                                    random_search=100, ncore=self.ncore)
-                            self.ncomp[j][i,k]=opti_param[0]
+                            if optimisation_model=='Bayesian':
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.bayesian_optimisation( self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            else:
+                                opti_param,self.contrast[k,j,i],simures,self.flux_opti[k,j,i]=self.pso_optimisation(self.contrast_esti, bounds,param_type, prev_res=simures,opti_param=param_optimisation,ncore=self.ncore)
+                            self.ncomp[j][i,k]=int(opti_param[0])
                             self.delta_rot[j][i,k]=opti_param[1]
                             print('FM KLIP Bayesian optimization: annulus {} done!'.format(i))      
                         self.param_opti_mode=opti_mode
@@ -2605,8 +3163,6 @@ class PyRSM:
         if thresh==False:
             
             psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
-            if self.cube[cuben].ndim==4:
-                psf_template =np.stack([psf_template]*self.cube[cuben].shape[0])
             
             cube_fc= cube_inject_companions(np.zeros_like(self.cube[cuben]), psf_template,
                                  self.pa[cuben], sel_flux, self.pxscale,
@@ -2659,7 +3215,7 @@ class PyRSM:
         sigposy=int(ceny + np.sin(sel_theta/360*twopi)*ann_center)
         sigposx=int(cenx+ np.cos(sel_theta/360*twopi)*ann_center)
 
-        indc = circle(sigposy, sigposx,int(self.fwhm/2)+1)
+        indc = disk((sigposy, sigposx),int(self.fwhm/2)+1)
         
         max_detect=self.probmap[indc[0],indc[1]].max()
         
@@ -2667,7 +3223,10 @@ class PyRSM:
         
         indicesy,indicesx=get_time_series(self.cube[cuben],ann_center)
         
-        bg_noise=np.max(self.probmap[indicesy,indicesx])
+        if self.inv_ang==True:
+            bg_noise=np.max(self.probmap[indicesy,indicesx])
+        else:
+            bg_noise=np.mean(self.probmap[indicesy,indicesx])
         
         return max_detect/bg_noise
     
@@ -2847,6 +3406,8 @@ class PyRSM:
 
                 # Step-1: Selection of the optimal crop size, the intensity parameter estimator, and the multiplicative factor for the variance based estimator   
                 
+                
+                
                 self.distrifit[j][:,i]=False
                 
                 self.var[j][:,i]='FR'
@@ -2933,7 +3494,7 @@ class PyRSM:
                     if self.cube[i].ndim==4:
                         var_list=[['FR','FM',],['FR','FM']]
                     else:
-                        var_list=[['FR','FM','TE','ST','SM'],['FR','FM','TE']]
+                        var_list=[['FR','FM','ST','SM'],['FR','FM']]
                         
                     if self.intensity[j][0,i]=='Pixel':
                         n=1
@@ -2942,7 +3503,7 @@ class PyRSM:
                         
                     for m in range(1,len(var_list[0])):
                         
-                        if (n==1 and m<3) or n==0:
+                        if (n==1 and m<2) or n==0: # m>3 if TE is used
                             self.var[j][:,i]=var_list[n][m]
                             res_param=pool_map(self.ncore, self.opti_RSM_var_full, iterable(range_sel),i,j,estimator,colmode)
                             opti_temp=0
@@ -2950,7 +3511,7 @@ class PyRSM:
                                 opti_temp+=res_temp[0]
                             optires[m]=opti_temp
                                   
-                    self.var[j][:,i]=['FR','FM','TE','ST','SM'][optires.argmax()]
+                    self.var[j][:,i]=['FR','FM','ST','SM'][optires.argmax()]
                     fit_sel[0,0]=optires.max()
                     
                     
@@ -2964,7 +3525,7 @@ class PyRSM:
                     for m in range(5):
                         var_sel[range_sel[0]:(range_sel[-1]+1),m]=interpolation(var_sel[:,m],range_sel)
                     for l in range(self.minradius,max_rad):
-                        self.var[j][l,i]=['FR','FM','TE','ST','SM'][var_sel[l,:].argmax()]
+                        self.var[j][l,i]=['FR','FM','ST','SM'][var_sel[l,:].argmax()]
                         if self.intensity[j][l,i]=='Pixel' and (self.var[j][l,i]=='ST' or self.var[j][l,i]=='SM'):
                             self.var[j][l,i]='FR'
                         fit_sel[l,0]=var_sel[l,:].max()
@@ -2999,12 +3560,12 @@ class PyRSM:
                 self.pa[n]=-self.pa[n]
      
         
-    def opti_combi_full(self,l,estimator,colmode,op_sel,SNR=False):
+    def opti_combi_full(self,l,estimator,colmode,op_sel,SNR=False,ini=False):
         
         """
         Function computing the performance index of the RSM detection map for the tested sets of
         likelihhod cubes/residuals cubes used by the optimal subset selection function in the case of the full-frame 
-        optimization mode. The performance index is computed based on the set of likelihood cubes op_sel
+        optimization mode. The performance index is computed based on the set of likelihood cubes op_seli
         for the radial distance l, relying either on the RSM algorithm or S/N map to compute the detection map.
         When using the RSM algorithm to gennerated the final probability map, the detection map is computed 
         using the estimator ('Forward' or 'Forward-Bakward') probability computation mode and the colmode
@@ -3012,23 +3573,23 @@ class PyRSM:
         This function is used by the optimal subset of likelihood cubes selection function (RSM_combination).
         """
         
-        
+        op_seli=op_sel.copy()
         if SNR==True:
             
             mod_sel=[]
             
-            for k in range(len(op_sel)):
-                i=op_sel[k][0]
-                j=op_sel[k][1]
+            for k in range(len(op_seli)):
+                i=op_seli[k][0]
+                j=op_seli[k][1]
                 if (self.model[j]!='FM KLIP' and self.model[j]!='FM LOCI') or (self.model[j]=='FM KLIP' and l<self.max_r) or (self.model[j]=='FM LOCI' and l<self.max_r):
-                    mod_sel.append(op_sel[k])
+                    mod_sel.append(op_seli[k])
             if len(mod_sel)>0:
                 return self.contrast_multi_snr(l,mod_sel=mod_sel)
             else:
                 return 0
         else:
                 
-            mod_del=[]
+            mod_deli=[]
             
             if self.contrast_sel=='Max':
                 opti_pos=np.unravel_index(self.flux_opti[:,:,l].argmax(), self.flux_opti[:,:,l].shape)
@@ -3037,22 +3598,20 @@ class PyRSM:
             elif self.contrast_sel=='Min':
                 opti_pos=np.unravel_index(self.flux_opti[:,:,l].argmin(), self.flux_opti[:,:,l].shape)
                 
-            flux_opti=self.flux_opti[opti_pos[0],opti_pos[1],l]
             opti_theta=self.opti_theta[opti_pos[0],l]        
-            for k in range(len(op_sel)):
-                i=op_sel[k][0]
-                j=op_sel[k][1]
-                if (self.model[j]=='FM KLIP' and l>=self.max_r) or (self.model[j]=='FM LOCI' and l>=self.max_r):
-                    mod_del.append(k)
-                else: 
-                    self.RSM_test(i,j,l,opti_theta,flux_opti)
+            for k in range(len(op_seli)):
+                i=op_seli[k][0]
+                j=op_seli[k][1]
+                if (self.model[j]=='FM KLIP' and l>=self.max_r) or (self.model[j]=='FM LOCI' and l>=self.max_r) or (self.model[j]=='FM KLIP' and ini==True) or (self.model[j]=='FM LOCI' and ini==True):
+                    mod_deli.append(k)
+
             
-            if len(mod_del)>0:
-                for index in sorted(mod_del, reverse=True): 
-                    del op_sel[index]  
+            if len(mod_deli)>0:
+                for index in sorted(mod_deli, reverse=True): 
+                    del op_seli[index]  
                 
-            if len(op_sel)>0:
-                self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=l,sel_cube=op_sel)
+            if len(op_seli)>0:
+                self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=l,sel_cube=op_seli)
                 return self.perf_esti(i,j,l,opti_theta)
             else:
                 return 0
@@ -3096,24 +3655,21 @@ class PyRSM:
                     for j in range(len(self.model)):
                         
                         if SNR==True:
-            
-                            mod_sel=[]
-                            
-                            for k in range(len(op_sel)):
-                                i=op_sel[k][0]
-                                j=op_sel[k][1]
-                                if (self.model[j]=='FM KLIP' and k>=self.max_r) or (self.model[j]=='FM LOCI' and k>=self.max_r):
-                                   del mod_sel[mod_sel.index([i,j])]
-                            if len(mod_sel)>0:
-                                res_opti=self.contrast_multi_snr(k,mod_sel=mod_sel)
-                            else:
-                                res_opti==0
+                            if (self.model[j]=='FM KLIP' and k>=self.max_r) or (self.model[j]=='FM LOCI' and k>=self.max_r):
+                                del mod_sel[mod_sel.index([i,j])]
+
                         else:
                             if (self.model[j]!='FM KLIP' and self.model[j]!='FM LOCI') or  (self.model[j]=='FM KLIP' and k<self.max_r) or (self.model[j]=='FM LOCI' and k<self.max_r):
                                 self.RSM_test(i,j,k,self.opti_theta[opti_pos[0],k] ,self.flux_opti[opti_pos[0],opti_pos[1],k])
                             else:
                                 del mod_sel[mod_sel.index([i,j])]
-                if SNR==False:
+                                
+                if SNR==True:  
+                    if len(mod_sel)>0:
+                        res_opti=self.contrast_multi_snr(k,mod_sel=mod_sel)
+                    else:
+                        res_opti==0
+                else:
                     self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=k,sel_cube=mod_sel)
                     res_opti=self.perf_esti(i,j,k,self.opti_theta[opti_pos[0],k])
 
@@ -3185,6 +3741,59 @@ class PyRSM:
         print('Greedy selection: Radius {} done!'.format(k))  
         return op_sel
     
+    def RSM_test_multi(self,cuben,modn,range_sel):
+        
+        """
+        Function computing the cube of likelihoods for a given PSF-subtraction 
+        techniques 'modn', a given ADI sequence 'cuben' and a given angular distance 'ann_center'
+        with or without the injection of a fake companion (respc. thresh=False and thresh=False). 
+        Sel_theta indicate the azimuth of the injected fake companion and sel_flux the flux 
+        associated to the fake companion. This function is used by the RSM optimization function (opti_RSM).
+        """
+        like_temp=np.zeros(((rot_scale('ini',self.cube[cuben],None,self.pa[cuben],self.scale_list[cuben],self.imlib, self.interpolation)[0].shape[0]+1),self.cube[cuben].shape[-2],self.cube[cuben].shape[-1],len(self.interval[modn][np.argmax(self.interval[modn][:,cuben]),cuben]),2,self.crop_range[modn]))    
+            
+        for l in range_sel:
+            
+            if self.contrast_sel=='Max':
+                opti_pos=np.unravel_index(self.flux_opti[:,:,l].argmax(), self.flux_opti[:,:,l].shape)
+            elif self.contrast_sel=='Median':
+                opti_pos=np.unravel_index(np.argmin(abs(self.flux_opti[:,:,l]-np.median(self.flux_opti[:,:,l]))), self.flux_opti[:,:,l].shape)
+            elif self.contrast_sel=='Min':
+                opti_pos=np.unravel_index(self.flux_opti[:,:,l].argmin(), self.flux_opti[:,:,l].shape)
+                
+            flux_opti=self.flux_opti[opti_pos[0],opti_pos[1],l]
+            opti_theta=self.opti_theta[opti_pos[0],l]    
+                
+            psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
+
+            
+            cube_fc= cube_inject_companions(np.zeros_like(self.cube[cuben]), psf_template,
+                                 self.pa[cuben], flux_opti, self.pxscale,
+                                 rad_dists=l,
+                                 theta=opti_theta,
+                                 verbose=False)
+               
+            result = self.likelihood(l,cuben,modn,np.zeros_like(self.cube[cuben]),cube_fc,False)
+                
+
+            indicesy,indicesx=get_time_series(self.cube[cuben],l)          
+            if self.model[modn]=='FM LOCI' or self.model[modn]=='FM KLIP':
+                like_temp[:,indicesy,indicesx,:,:,:]=result[1]
+                self.psf_fm[cuben][modn][result[0]]=result[2]
+            else:
+                 like_temp[:,indicesy,indicesx,:,:,:]=result[1]
+        
+        
+        like=[]
+        flux_FMMF=[]
+
+        for k in range(self.crop_range[modn]):
+            like.append(like_temp[0:(like_temp.shape[0]-1),:,:,:,:,k])
+            flux_FMMF.append(like_temp[(like_temp.shape[0]-1),:,:,0,0,k])
+        
+        self.like_fin[cuben][modn]=like 
+        self.flux_FMMF[cuben][modn]=flux_FMMF 
+    
                                          
     def opti_combination(self,estimator='Forward',colmode='median',threshold=True,contrast_sel='Max',combination='Bottom-Up',SNR=False):  
 
@@ -3241,8 +3850,59 @@ class PyRSM:
         self.contrast_sel=contrast_sel
         self.combination=combination
         
+                
+        for j in range(len(self.model)):
+            for i in range(len(self.cube)):
+                
+                # Determination of the considered angular distances for the optimization process
+                
+                if self.model[j]=='FM KLIP' or self.model[j]=='FM LOCI':
+                    max_rad=self.max_r+1
+                else:
+                    max_rad=self.maxradius+1
+                
+                if self.opti_mode=='full-frame':
+                    if self.trunc is not None:
+                        max_rad=min(self.trunc*self.asize[j],max_rad)
+                    if max_rad>self.minradius+3*self.asize[j]+self.asize[j]//2:
+                        range_sel = list(range(self.minradius+self.asize[j]//2,self.minradius+3*self.asize[j]+self.asize[j]//2,self.asize[j]))
+                        if max_rad>self.minradius+7*self.asize[j]:
+                            range_sel.extend(list(range(self.minradius+3*self.asize[j]+self.asize[j]//2,self.minradius+7*self.asize[j],2*self.asize[j])))
+                            range_sel.extend(list(range(self.minradius+7*self.asize[j]+self.asize[j]//2,max_rad-3*self.asize[j]//2-1,4*self.asize[j])))
+                            range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[j]*self.asize[j]-self.asize[j]//2-1)
+                        else:
+                            range_sel.extend(list(range(self.minradius+3*self.asize[j]+self.asize[j]//2,max_rad-self.asize[j]//2,2*self.asize[j])))
+                            if max_rad==self.minradius+7*self.asize[j]:
+                                range_sel.append(self.minradius+(max_rad-self.minradius)//self.asize[j]*self.asize[j]-self.asize[j]//2-1)
+                    else:
+                        range_sel=list(range(self.minradius+self.asize[j]//2,max_rad-self.asize[j]//2,self.asize[j]))
+                elif self.opti_mode=='annular':
+                    range_sel=range(self.minradius+self.asize[j]//2,max_rad-self.asize[j]//2,self.asize[j])
+                    
+                    
+                    
+                # Computation of the median flux position in the original ADI sequence which will be used during the RSM optimization
+                for k in range_sel:  
+                    
+                    indicesy,indicesx=get_time_series(self.cube[i],k)
+                    cube_derot,angle_list,scale_list=rot_scale('ini',self.cube[i],None,self.pa[i],self.scale_list[i], self.imlib, self.interpolation)  
+                    cube_derot=rot_scale('fin',self.cube[i],cube_derot,angle_list,scale_list, self.imlib, self.interpolation)
+                    apertures = photutils.CircularAperture(np.array((indicesx, indicesy)).T, round(self.fwhm/2))
+                    fluxes = photutils.aperture_photometry(cube_derot.sum(axis=0), apertures)
+                    fluxes = np.array(fluxes['aperture_sum'])
+                    x_sel=indicesx[np.argsort(fluxes)[len(fluxes)//2]]
+                    y_sel=indicesy[np.argsort(fluxes)[len(fluxes)//2]]
+                    
+                    ceny, cenx = frame_center(cube_derot[0])
+                    
+                    self.opti_theta[i,k]=np.degrees(np.arctan2(y_sel-ceny, x_sel-cenx))
+                    
+                if SNR==False:   
+                    self.RSM_test_multi(i,j,range_sel)
+        
         # Selection of the optimal set of cubes of likelihoods / cubes of residuals via top-down or bottom-up greedy selection
-
+        ncore_temp=np.copy(self.ncore)
+        self.ncore=1
         if self.opti_mode=='full-frame':
             
             # Determination of the considered angular distances for the optimization process
@@ -3293,7 +3953,17 @@ class PyRSM:
     
             
                 self.opti_sel=list([mod_sel]*(self.maxradius+1))
-    
+
+
+                #if self.contrast_sel!='Min':
+                #    self.contrast_sel='Min'
+                #    for n in range(len(mod_sel)):
+                #        self.RSM_test_multi(mod_sel[n][0],mod_sel[n][1],range_sel)
+                #    results=pool_map(self.ncore, self.opti_combi_full,iterable(range_sel),estimator,colmode,mod_sel,SNR)
+                #    self.opti_combi_res=np.sum(results)
+                #else:    
+                #     self.opti_combi_res=res_opti
+                     
                 print('Greedy selection done!') 
                 
             elif self.combination=='Bottom-Up':
@@ -3303,7 +3973,7 @@ class PyRSM:
                 for i in range(len(self.cube)):
                     for j in range(len(self.model)):
 
-                                results=pool_map(self.ncore, self.opti_combi_full,iterable(range_sel),estimator,colmode,[[i,j]],SNR)
+                                results=pool_map(self.ncore, self.opti_combi_full,iterable(range_sel),estimator,colmode,[[i,j]],SNR,True)
                                 
                                 res_sep.append(sum(results))
                                 sel_cube.append([i,j])
@@ -3332,16 +4002,24 @@ class PyRSM:
                         opti_res=max(res_temp)
                         op_sel.append(sel_cube[np.argmax(np.array(res_temp))])
                         mod_del.append(np.argmax(np.array(res_temp)))
-                        if len(mod_del)>0:
-                            for index in sorted(mod_del, reverse=True): 
-                                del sel_cube[index]
                     else:
                         prev_opti_res=opti_res
+                    if len(mod_del)>0:
+                        for index in sorted(mod_del, reverse=True): 
+                            del sel_cube[index]
                         
                     print('Round done!')
                 
                 self.opti_sel=list([op_sel]*(self.maxradius+1))
-    
+                
+                #if self.contrast_sel!='Min':
+                #    self.contrast_sel='Min'
+                #    for n in range(len(op_sel)):
+                #        self.RSM_test_multi(op_sel[n][0],op_sel[n][1],range_sel)
+                #    results=pool_map(self.ncore, self.opti_combi_full,iterable(range_sel),estimator,colmode,op_sel,SNR)
+                #    self.opti_combi_res=np.sum(results)
+                #else:    
+                #     self.opti_combi_res=opti_res
                 print('Greedy selection done!') 
              
         elif self.opti_mode=='annular':
@@ -3367,7 +4045,8 @@ class PyRSM:
             #else:
 
             self.threshold_esti(estimator=estimator,colmode=colmode,Full=False)            
-        
+                
+        self.ncore=ncore_temp
         if self.inv_ang==True:
             for n in range(len(self.cube)):
                 self.pa[n]=-self.pa[n]
@@ -3402,9 +4081,8 @@ class PyRSM:
                 
         self.opti_map(estimator=estimator,colmode=colmode,threshold=False,Full=False)
         
-        if self.inv_ang==False:
-            for n in range(len(self.cube)):
-                self.pa[n]=-self.pa[n]  
+        self.final_map_inv=np.copy(self.final_map)
+        
                 
         for k in range_sel:
             indicesy,indicesx=get_time_series(self.cube[0],k)
@@ -3412,10 +4090,15 @@ class PyRSM:
         
         if self.opti_mode=='full-frame':
             self.threshold=poly_fit(self.threshold,range_sel,3)
+            
+        if self.inv_ang==False:
+            for n in range(len(self.cube)):
+                self.pa[n]=-self.pa[n]
+                
         print('Threshold determination done!')
         
         
-    def opti_map(self,estimator='Forward',colmode='median',threshold=True,Full=False,SNR=False): 
+    def opti_map(self,estimator='Forward',colmode='median',ns=1,threshold=True,Full=False,SNR=False,verbose=True): 
         
         
         """
@@ -3436,6 +4119,10 @@ class PyRSM:
             Method used to generate the final probability map from the three-dimensionnal cube
             of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
             the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
+        ns: float , optional
+            Number of regime switches. Default is one regime switch per annulus but 
+            smaller values may be used to reduce the impact of noise or disk structures
+            on the final RSM probablity map.
         threshold: bool, optional
             When True the radial treshold is computed during the RSM_combination is applied on the
             final detection map with the original parallactic angles. Only used when relying on the auto-RSM
@@ -3479,7 +4166,7 @@ class PyRSM:
             
             
             if SNR==True:
-                self.final_map=self.SNR_esti_annular(sel_cube=self.opti_sel,verbose=True)
+                self.final_map=self.SNR_esti_annular(sel_cube=self.opti_sel,verbose=verbose)
             else:
                 self.opti=False
                 it=0
@@ -3499,7 +4186,10 @@ class PyRSM:
                         like_temp=np.zeros(((residuals_cube_.shape[0]+1),self.cube[self.opti_sel[k][m][0]].shape[-2],self.cube[self.opti_sel[k][m][0]].shape[-1],len(self.interval[self.opti_sel[k][m][1]][k,self.opti_sel[k][m][0]]),2,self.crop_range[self.opti_sel[k][m][1]]))    
                     
                     
-                        time_out=120/250*residuals_cube_.shape[0]*self.asize[0]
+                        #Sometimes the parallel computation get stuck, to avoid that we impose a maximum computation
+                        #time of 0.01 x number of frame x number of pixels in the last annulus of range_sel x 2 x pi (0.01 second
+                        #per treated pixel)
+                        time_out=0.01*residuals_cube_.shape[0]*2*range_sel[-1]*np.pi
                         results=[]    
                         pool=Pool(processes=self.ncore)           
                         for e in range_sel:
@@ -3538,7 +4228,7 @@ class PyRSM:
                     
                     for l in range_sel:
                         indicesy,indicesx=get_time_series(self.cube[0],l)
-                        self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=l,sel_cube=self.opti_sel[l])  
+                        self.probmap_esti(ns=ns, estimator=estimator,colmode=colmode,ann_center=l,sel_cube=self.opti_sel[l])  
                 
                         if threshold==True:
                             self.final_map[indicesy,indicesx]=self.probmap[indicesy,indicesx]-self.threshold[l]
@@ -3551,17 +4241,17 @@ class PyRSM:
         elif self.opti_mode=='full-frame':
             
             if SNR==True:
-                self.final_map=self.SNR_esti_full(sel_cube=self.opti_sel[0],verbose=True)
+                self.final_map=self.SNR_esti_full(sel_cube=self.opti_sel[0],verbose=verbose)
             else:
             
                 range_sel= range(self.minradius,self.maxradius+1)
                 self.opti=False
-                mod_sel=self.opti_sel.copy()
-                self.lik_esti(sel_cube=mod_sel[0])
+                mod_sel=self.opti_sel[0].copy()
+                self.lik_esti(sel_cube=mod_sel,verbose=verbose)
                 
                 
                 if 'FM KLIP' not in self.model and 'FM LOCI' not in self.model:
-                    self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=None,sel_cube=mod_sel[0]) 
+                    self.probmap_esti(ns=ns, estimator=estimator,colmode=colmode,ann_center=None,sel_cube=mod_sel) 
                     for k in range_sel:
                         indicesy,indicesx=get_time_series(self.cube[0],k) 
                         if threshold==True:
@@ -3584,10 +4274,10 @@ class PyRSM:
         
                             if len(mod_sel)==0:
                                 break
-                            self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=k,sel_cube=mod_sel[0]) 
+                            self.probmap_esti(ns=ns, estimator=estimator,colmode=colmode,ann_center=k,sel_cube=mod_sel) 
                                 
                         else:
-                            self.probmap_esti(ns=1, estimator=estimator,colmode=colmode,ann_center=k,sel_cube=mod_sel[0]) 
+                            self.probmap_esti(ns=ns, estimator=estimator,colmode=colmode,ann_center=k,sel_cube=mod_sel) 
         
         
                         indicesy,indicesx=get_time_series(self.cube[0],k)                    
@@ -3596,8 +4286,8 @@ class PyRSM:
                         else:
                             self.final_map[indicesy,indicesx]=self.probmap[indicesy,indicesx]
                     
-
-        print('Final RSM map computation done!')
+        if verbose:
+            print('Final RSM map computation done!')
 
         
         
@@ -3659,8 +4349,7 @@ class PyRSM:
             flux[k] = sigma_corr*noise
 
             psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
-            if self.cube[cuben].ndim==4:
-                psf_template =np.stack([psf_template]*self.cube[cuben].shape[0])
+            
             fc_map = np.ones((self.cube[cuben].shape[-2],self.cube[cuben].shape[-1])) * 1e-6
             fcy=[]
             fcx=[]
@@ -3676,8 +4365,12 @@ class PyRSM:
                                                        ang_fc[i]))
                 x = int(cenx) + ann_center * np.cos(np.deg2rad(
                                                        ang_fc[i]))
-                fc_map = frame_inject_companion(fc_map, psf_template[0], y, x,
-                                                flux[k])
+                if self.cube[cuben].ndim==4:
+                    fc_map = frame_inject_companion(fc_map, np.mean(psf_template,axis=0), y, x,
+                                            flux[k])
+                else:
+                    fc_map = frame_inject_companion(fc_map, psf_template, y, x,
+                                            flux[k])
                 fcy.append(y)
                 fcx.append(x)
     
@@ -3806,3 +4499,923 @@ class PyRSM:
                 snrmap_array[yy.astype('int'), xx.astype('int')]=np.asarray(snr_temp).mean(axis=0)[yy.astype('int'), xx.astype('int')]
         
         return snrmap_array
+    
+
+
+    def estimate_probmax_fc(self,a,b,level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor=[1],estimator='Forward', colmode='median'):
+        
+        ncore_temp=np.copy(self.ncore)
+        self.ncore=1
+        self.minradius=a-1
+        self.maxradius=a+1
+        
+        for j in range(len(cube)):
+    
+            cubefc = cube_inject_companions(cube[j], self.psf[j], self.pa[j], flevel=level*scaling_factor[j], plsc=self.pxscale, 
+                                    rad_dists=a, theta=b/n_fc*360, n_branches=1,verbose=False)
+            self.cube[j]=cubefc
+        
+        self.opti_map(estimator=estimator,colmode=colmode,threshold=threshold,verbose=False) 
+                
+        rsm_fin = np.where(abs(np.nan_to_num(self.final_map))>0.000001,0,probmap)+np.nan_to_num(self.final_map)
+    
+        rsm_fin=rsm_fin+abs(rsm_fin.min())
+    
+        n,y,x=cubefc.shape
+        twopi=2*np.pi
+        sigposy=int(y/2 + np.sin(b/n_fc*twopi)*a)
+        sigposx=int(x/2+ np.cos(b/n_fc*twopi)*a)
+    
+        indc = disk((sigposy, sigposx),3)
+        max_target=np.nan_to_num(rsm_fin[indc[0],indc[1]]).max()
+        rsm_fin[indc[0],indc[1]]=0
+        max_map=np.nan_to_num(rsm_fin).max()
+        
+        print("Distance: "+"{}".format(a)+" Position: "+"{}".format(b)+" Level: "+"{}".format(level)+" Probability difference: "+"{}".format(max_target-max_map))
+        self.ncore=ncore_temp
+        
+        return max_target-max_map,b
+    
+
+    def contrast_curve(self,an_dist,ini_contrast,probmap,inv_ang=False,threshold=False,psf_oa=None,estimator='Forward',colmode='median',n_fc=20,completeness=0.9):
+        
+        """
+        Function allowing the computation of contrast curves using the RSM framework
+        (for more details see Dahlqvist et al. 2021)
+        
+        Parameters
+        ----------
+        an_dist: list or ndarray
+            List of angular separations for which a contrast has to be estimated.
+        ini_contrast: list or ndarray
+            Initial contrast for the range of angular separations included in an_dist.
+            The number of initial contrasts shoul be equivalent to the number of angular
+            separations.
+        probmap: numpy 2d ndarray
+            Detection map provided by the RSM algorithm via opti_map or probmap_esti.
+        inv_ang: bool, optional
+            If True, the sign of the parallactic angles of all ADI sequence is flipped for
+            the computation of the contrast. Default is False.
+        threshold: bool, optional 
+            If an angular separation based threshold has been used when generating the
+            detection map, the same set of thresholds should be considered as well during
+            the contrast computation. Default is False.
+        psf_oa: bool, optional, optional
+            Saturated PSF of the host star used to compute the scaling factor allowing the 
+            conversion between contrasts and fluxes for the injection of fake companions
+            during the computation of the contrast. If no Saturated PSF is provided, the 
+            ini_contrast should be provided in terms of flux instead of contrast. 
+            Default is None.
+        estimator: str, optional
+            Approach used for the probability map estimation either a 'Forward' model
+            (approach used in the original RSM map algorithm) which consider only the 
+            past observations to compute the current probability or 'Forward-Backward' model
+            which relies on both past and future observations to compute the current probability
+        colmode:str, optional
+            Method used to generate the final probability map from the three-dimensionnal cube
+            of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
+            the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
+        n_fc: int, optional
+            Number of azimuths considered for the computation of the True positive rate/completeness,
+            (number of fake companions injected separately). The number of azimuths is defined 
+            such that the selected completeness is reachable (e.g. 95% of completeness requires at least
+            20 fake companion injections). Default 20.
+        completeness: float, optional
+            The completeness level to be achieved when computing the contrasts, i.e. the True positive
+            rate reached at the threshold associated to the first false positive (the first false 
+            positive is defined as the brightest speckle present in the entire detection map). Default 95.
+            
+        Returns
+        ----------
+        1D numpy ndarray containg the contrasts for the considered angular distance at the selected
+        completeness level.            
+        """
+        
+        if type(probmap) is not np.ndarray:
+            if type(self.final_map) is not np.ndarray:
+                raise ValueError("A detection map should be provided")
+            else:
+                probmap=np.copy(self.final_map)
+        if threshold==True and type(self.threshold) is not np.ndarray:
+            raise ValueError("If threshold is true a threshold should be provided via self.threshold")
+            
+        if (100*completeness)%(100/n_fc)>0:
+            n_fc=int(100/math.gcd(int(100*completeness), 100))
+        
+        minradius_temp=np.copy(self.minradius)
+        maxradius_temp=np.copy(self.maxradius)
+        cube=self.cube.copy()
+        scaling_factor=[]
+        
+        for i in range(len(self.psf)):
+       
+            if psf_oa is not None:
+                indices = get_annulus_segments(self.psf[i],0,round((self.fwhm)/2),1) 
+                indices_oa = get_annulus_segments(psf_oa[i],0,round((self.fwhm)/2),1) 
+                scaling_factor.append(psf_oa[i][indices_oa[0][0], indices_oa[0][1]].sum()/self.psf[i][indices[0][0], indices[0][1]].sum())
+                
+            else:
+                scaling_factor.append(1)
+        
+        contrast_curve=np.zeros((len(an_dist)))
+        ini_contrast_in=np.copy(ini_contrast)
+        
+        for k in range(0,len(an_dist)):
+        
+            a=an_dist[k]
+            level=ini_contrast[k]
+            pos_detect=[]
+            
+            detect_bound=[None,None]
+            level_bound=[None,None]
+            
+            while len(pos_detect)==0:
+                pos_detect=[] 
+                pos_non_detect=[]
+                val_detect=[] 
+                val_non_detect=[] 
+                
+                res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(range(0,n_fc)),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                
+                for res_i in res:
+                    
+                   if res_i[0]>0:
+                       pos_detect.append(res_i[1])
+                       val_detect.append(res_i[0])
+                   else:
+                       pos_non_detect.append(res_i[1])
+                       val_non_detect.append(res_i[0])
+                        
+                        
+                if len(pos_detect)==0:
+                    level=level*1.5
+                    
+            if len(pos_detect)>round(completeness*n_fc):
+                detect_bound[1]=len(pos_detect)
+                level_bound[1]=level
+            elif len(pos_detect)<round(completeness*n_fc):
+                detect_bound[0]=len(pos_detect)
+                level_bound[0]=level            
+                pos_non_detect_temp=pos_non_detect.copy()
+                val_non_detect_temp=val_non_detect.copy()
+                pos_detect_temp=pos_detect.copy()
+                val_detect_temp=val_detect.copy()
+            
+            perc=len(pos_detect)/n_fc  
+            print("Initialization done: current precentage "+"{}".format(perc))    
+                
+            while (detect_bound[0]==None or detect_bound[1]==None) and len(pos_detect)!=round(completeness*n_fc):
+                
+                if detect_bound[0]==None:
+                    
+                    level=level*0.5
+                    pos_detect=[] 
+                    pos_non_detect=[]
+                    val_detect=[] 
+                    val_non_detect=[] 
+                    
+                    res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(range(0,n_fc)),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                
+                    for res_i in res:
+                        
+                       if res_i[0]>0:
+                           pos_detect.append(res_i[1])
+                           val_detect.append(res_i[0])
+                       else:
+                           pos_non_detect.append(res_i[1])
+                           val_non_detect.append(res_i[0])
+                        
+    
+                    if len(pos_detect)>round(completeness*n_fc) and level_bound[1]>level:
+                        detect_bound[1]=len(pos_detect)
+                        level_bound[1]=level
+                    elif len(pos_detect)<round(completeness*n_fc):
+                        detect_bound[0]=len(pos_detect)
+                        level_bound[0]=level 
+                        pos_non_detect_temp=pos_non_detect.copy()
+                        val_non_detect_temp=val_non_detect.copy()
+                        pos_detect_temp=pos_detect.copy()
+                        val_detect_temp=val_detect.copy()
+                        
+                elif detect_bound[1]==None:
+                    
+                    level=level*1.5
+                    
+                    res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_non_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                
+                    it=len(pos_non_detect)-1        
+                    for res_i in res:
+                        
+                        if res_i[0]>0:
+                           pos_detect.append(res_i[1])
+                           val_detect.append(res_i[0])
+                           del pos_non_detect[it]
+                           del val_non_detect[it]
+                        it-=1
+                           
+                    if len(pos_detect)>round(completeness*n_fc):
+                        detect_bound[1]=len(pos_detect)
+                        level_bound[1]=level
+                    elif len(pos_detect)<round(completeness*n_fc)  and level_bound[0]<level:
+                        detect_bound[0]=len(pos_detect)
+                        level_bound[0]=level
+                        pos_non_detect_temp=pos_non_detect.copy()
+                        val_non_detect_temp=val_non_detect.copy()
+                        pos_detect_temp=pos_detect.copy()
+                        val_detect_temp=val_detect.copy()
+                        
+            if len(pos_detect)!=round(completeness*n_fc):
+                print("Boundaries defined "+"{}".format(detect_bound[0]/n_fc)+" {}".format(detect_bound[1]/n_fc)) 
+            
+                pos_non_detect=pos_non_detect_temp.copy()
+                val_non_detect=val_non_detect_temp.copy()
+                pos_detect=pos_detect_temp.copy()
+                val_detect=val_detect_temp.copy()
+            
+            while len(pos_detect)!=round(completeness*n_fc):
+                                
+                level=level_bound[0]+(level_bound[1]-level_bound[0])/(detect_bound[1]-detect_bound[0])*(completeness*n_fc-detect_bound[0])
+            
+                res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_non_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+            
+                it=len(pos_non_detect)-1      
+                for res_i in res:
+                    
+                    if res_i[0]>0:
+                       pos_detect.append(res_i[1])
+                       val_detect.append(res_i[0])
+                       del pos_non_detect[it]
+                       del val_non_detect[it]
+                    it-=1
+                       
+                if len(pos_detect)>round(completeness*n_fc):
+                    detect_bound[1]=len(pos_detect)
+                    level_bound[1]=level
+                elif len(pos_detect)<round(completeness*n_fc)  and level_bound[0]<level:
+                    detect_bound[0]=len(pos_detect)
+                    level_bound[0]=level
+                    pos_non_detect_temp=pos_non_detect.copy()
+                    val_non_detect_temp=val_non_detect.copy()
+                    pos_detect_temp=pos_detect.copy()
+                    val_detect_temp=val_detect.copy()               
+                
+                if len(pos_detect)!=round(completeness*n_fc):
+                    
+                    pos_non_detect=pos_non_detect_temp.copy()
+                    val_non_detect=val_non_detect_temp.copy()
+                    pos_detect=pos_detect_temp.copy()
+                    val_detect=val_detect_temp.copy()
+    
+                    print("Current boundaries "+"{}".format(detect_bound[0]/n_fc)+" {}".format(detect_bound[1]/n_fc)) 
+    
+          
+            print("Distance: "+"{}".format(a)+" Final contrast "+"{}".format(level))  
+            contrast_curve[k]=level           
+            ini_contrast=ini_contrast_in*(contrast_curve[0:(k+1)]/ini_contrast_in[0:(k+1)]).sum()/(k+1)
+                
+        self.minradius=minradius_temp
+        self.maxradius=maxradius_temp
+        self.cube=cube
+        
+        return contrast_curve                              
+                                                   
+    def contrast_matrix(self,an_dist,ini_contrast,probmap=None,inv_ang=False,threshold=False,psf_oa=None,estimator='Forward',colmode='median',n_fc=20):
+    
+        """
+        Function allowing the computation of three dimensional contrast curves using the RSM framework,
+        with contrasts computed for multiple completeness level, allowing the reconstruction of the
+        contrast/completeness distribution for every considered angular separations.
+        (for more details see Dahlqvist et al. 2021)
+        
+        Parameters
+        ----------
+        an_dist: list or ndarray
+            List of angular separations for which a contrast has to be estimated.
+        ini_contrast: list or ndarray
+            Initial contrast for the range of angular separations included in an_dist.
+            The number of initial contrasts shoul be equivalent to the number of angular
+            separations.
+        probmap: numpy 2d ndarray
+            Detection map provided by the RSM algorithm via opti_map or probmap_esti.
+        inv_ang: bool, optional
+            If True, the sign of the parallactic angles of all ADI sequence is flipped for
+            the computation of the contrast. Default is False.
+        threshold: bool, optional 
+            If an angular separation based threshold has been used when generating the
+            detection map, the same set of thresholds should be considered as well during
+            the contrast computation. Default is False.
+        psf_oa: bool, optional, optional
+            Saturated PSF of the host star used to compute the scaling factor allowing the 
+            conversion between contrasts and fluxes for the injection of fake companions
+            during the computation of the contrast. If no Saturated PSF is provided, the 
+            ini_contrast should be provided in terms of flux instead of contrast. 
+            Default is None.
+        estimator: str, optional
+            Approach used for the probability map estimation either a 'Forward' model
+            (approach used in the original RSM map algorithm) which consider only the 
+            past observations to compute the current probability or 'Forward-Backward' model
+            which relies on both past and future observations to compute the current probability
+        colmode:str, optional
+            Method used to generate the final probability map from the three-dimensionnal cube
+            of probabilities generated by the RSM approach. It is possible to chose between the 'mean',
+            the 'median' of the 'max' value of the probabilities along the time axis. Default is 'median'.
+        n_fc: int, optional
+            Number of azimuths considered for the computation of the True positive rate/completeness,
+            (number of fake companions injected separately). The range of achievable completenness 
+            depends on the number of considered azimuths (the minimum completeness is defined as
+            1/n_fc an the maximum is 1-1/n_fc). Default 20.
+        
+        Returns
+        ----------
+        2D numpy ndarray providing the contrast with the first axis associated to the angular distance
+        and the second axis associated to the completeness level.
+        """
+        
+        if type(probmap) is not np.ndarray:
+            if type(self.final_map) is not np.ndarray:
+                raise ValueError("A detection map should be provided")
+            else:
+                probmap=np.copy(self.final_map)
+        if threshold==True and type(self.threshold) is not np.ndarray:
+            raise ValueError("If threshold is true a threshold should be provided via self.threshold")
+        
+        minradius_temp=np.copy(self.minradius)
+        maxradius_temp=np.copy(self.maxradius)
+        cube=self.cube.copy()
+        scaling_factor=[]
+        
+        for i in range(len(self.psf)):
+       
+            if psf_oa is not None:
+                indices = get_annulus_segments(self.psf[i],0,round((self.fwhm)/2),1) 
+                indices_oa = get_annulus_segments(psf_oa[i],0,round((self.fwhm)/2),1) 
+                scaling_factor.append(psf_oa[i][indices_oa[0][0], indices_oa[0][1]].sum()/self.psf[i][indices[0][0], indices[0][1]].sum())
+                
+            else:
+                scaling_factor.append(1)
+        
+        contrast_matrix=np.zeros((len(an_dist),n_fc+1))
+        detect_pos_matrix=[[]]*(n_fc+1)
+        ini_contrast_in=np.copy(ini_contrast)
+        
+        for k in range(0,len(an_dist)):
+        
+            a=an_dist[k]
+            level=ini_contrast[k]
+            pos_detect=[] 
+            detect_bound=[None,None]
+            level_bound=[None,None]
+            
+            while len(pos_detect)==0:
+                pos_detect=[] 
+                pos_non_detect=[]
+                
+                res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(range(0,n_fc)),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                
+                for res_i in res:
+                    
+                   if res_i[0]>0:
+                       pos_detect.append(res_i[1])
+                   else:
+                       pos_non_detect.append(res_i[1])
+                        
+                contrast_matrix[k,len(pos_detect)]=level
+                detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())]
+                if len(pos_detect)==0:
+                    level=level*1.5
+    
+            perc=len(pos_detect)/n_fc  
+            
+            print("Initialization done: current data point "+"{}".format(perc)) 
+           
+            while contrast_matrix[k,0]==0:
+                
+                level=level*0.75
+                
+                res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+            
+                it=len(pos_detect)-1        
+                for res_i in res:
+                    
+                    if res_i[0]<0:
+                       pos_non_detect.append(res_i[1])
+                       del pos_detect[it]
+                    it-=1
+    
+                contrast_matrix[k,len(pos_detect)]=level
+                detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())]
+    
+            print("Lower boundary found") 
+            
+            level=contrast_matrix[k,np.where(contrast_matrix[k,:]>0)[0][-1]]
+            
+            pos_detect=[] 
+            pos_non_detect=list(np.arange(0,11))
+            
+            while contrast_matrix[k,n_fc]==0:
+                
+                level=level*1.25
+                
+                res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_non_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+            
+                it=len(pos_non_detect)-1        
+                for res_i in res:
+                    
+                    if res_i[0]>0:
+                       pos_detect.append(res_i[1])
+                       del pos_non_detect[it]
+                    it-=1
+    
+                contrast_matrix[k,len(pos_detect)]=level
+                detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())]
+    
+            print("Upper boundary found") 
+    
+            missing=np.where(contrast_matrix[k,:]==0)[0]
+            computed=np.where(contrast_matrix[k,:]>0)[0]
+            while len(missing)>0:
+                
+                detect_bound[0]= computed[np.argmax((computed-missing[0])[computed<missing[0]])]
+                level_bound[0]=contrast_matrix[k,detect_bound[0]]
+                detect_bound[1]= -np.sort(-computed)[np.argmax(np.sort((missing[0]-computed))[np.sort((missing[0]-computed))<0])]
+                level_bound[1]=contrast_matrix[k,detect_bound[1]]
+                it=0    
+                while len(pos_detect)!=missing[0]:
+                    
+                    if np.argmin([len(detect_pos_matrix[detect_bound[1]][0]),len(detect_pos_matrix[detect_bound[0]][1])])==0:
+                        
+
+                        pos_detect=list(np.sort(detect_pos_matrix[detect_bound[1]][0]))
+                        pos_non_detect=list(np.sort(detect_pos_matrix[detect_bound[1]][1]))
+                        
+                        level=level_bound[1]+(level_bound[1]-level_bound[0])/(detect_bound[1]-detect_bound[0])*(missing[0]-detect_bound[1])
+                        
+                        res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                    
+                        it=len(pos_detect)-1      
+                        for res_i in res:
+                            
+                            if res_i[0]<0:
+                               pos_non_detect.append(res_i[1])
+                               del pos_detect[it]
+                            it-=1   
+    
+                    else:
+                        
+                        pos_detect=list(np.sort(detect_pos_matrix[detect_bound[0]][0]))
+                        pos_non_detect=list(np.sort(detect_pos_matrix[detect_bound[0]][1]))
+                                   
+                        level=level_bound[0]+(level_bound[1]-level_bound[0])/(detect_bound[1]-detect_bound[0])*(missing[0]-detect_bound[0])
+                        
+                        res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_non_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
+                    
+                        it=len(pos_non_detect)-1      
+                        for res_i in res:
+                            
+                            if res_i[0]>0:
+                               pos_detect.append(res_i[1])
+                               del pos_non_detect[it]
+                            it-=1
+                        
+                    if len(pos_detect)>missing[0]:
+                        detect_bound[1]=len(pos_detect)
+                        level_bound[1]=level
+                    elif len(pos_detect)<missing[0]  and level_bound[0]<level:
+                        detect_bound[0]=len(pos_detect)
+                        level_bound[0]=level
+        
+                    contrast_matrix[k,len(pos_detect)]=level
+                    detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())]
+                    
+                    if len(pos_detect)==missing[0]:
+    
+                        print("Data point "+"{}".format(len(pos_detect)/n_fc)+" found. Still "+"{}".format(len(missing)-i-1)+" data point(s) missing") 
+                    
+                computed=np.where(contrast_matrix[k,:]>0)[0]
+                missing=np.where(contrast_matrix[k,:]==0)[0]
+                
+            ini_contrast=ini_contrast_in*(contrast_matrix[k,int(n_fc/2)]/ini_contrast_in[0:(k+1)]).sum()/(k+1)
+           
+        self.minradius=minradius_temp
+        self.maxradius=maxradius_temp
+        self.cube=cube
+        
+        return contrast_matrix 
+    
+
+    def multi_estimate_flux_negfc(self,param,level=None,expected_pos=None,cube=None,ns=1,loss_func='value',scaling_factor=[1],opti='photo',norma_factor=[1,1]):
+        
+        args=(level,expected_pos,cube,ns,loss_func,scaling_factor,'interval',norma_factor)  
+        res_param = pool_map(self.ncore, self.estimate_flux_negfc, iterable(np.array(param)),*args)
+        return np.array(res_param)
+        
+    def estimate_flux_negfc(self,param,level,expected_pos,cube,ns,loss_func='value',scaling_factor=[1],opti='photo',norma_factor=[1,1]):
+    
+        ncore_temp=np.copy(self.ncore)
+        self.ncore=1
+        
+        if opti=='photo':
+            level=param
+        elif opti=='bayesian':
+            level=param[0]
+            expected_pos=[param[1],param[2]]
+        elif opti=='interval':
+            level=param[0]*norma_factor[0]
+            expected_pos=[param[1],param[2]]
+    
+        ceny, cenx = frame_center(cube[0])
+    
+        an_center=np.sqrt((expected_pos[0]-ceny)**2+(expected_pos[1]-cenx)**2)
+    
+        a=int(an_center)
+    
+        expected_theta=np.degrees(np.arctan2(expected_pos[0]-ceny, expected_pos[1]-cenx))
+    
+        self.minradius=a-round(self.fwhm)//2
+        self.maxraddius=a+round(self.fwhm)//2
+    
+        for j in range(len(cube)):
+    
+            cubefc = cube_inject_companions(cube[j], self.psf[j],self.pa[j], flevel=-level*scaling_factor[j], plsc=self.pxscale, 
+                                    rad_dists=an_center, theta=expected_theta, n_branches=1,verbose=False)
+            self.cube[j]=cubefc    
+
+        self.opti_map(estimator='Forward-Backward',ns=ns,colmode='median',threshold=False,verbose=False) 
+        #plot_frames(self.final_map)
+    
+        indices=get_annulus_segments(cube[0][0],a-int(self.fwhm)//2,int(self.fwhm)+1,1) 
+    
+        indc = disk((expected_pos[0], expected_pos[1]),2*int(self.fwhm)+1)
+        indc2 = disk((expected_pos[0], expected_pos[1]),3*int(self.fwhm)+1)
+        
+        ind_circle=np.array([x for x in set(tuple(x) for x in np.array(indices[0]).T) & set(tuple(x) for x in np.array(indc).T)]).T
+        
+        ind_circle2=np.array([x for x in set(tuple(x) for x in np.array(indices[0]).T) & set(tuple(x) for x in np.array(indc2).T)]).T
+    
+        del_list=-np.sort(-np.array([np.intersect1d(np.where(ind_circle2[0]==ind_circle[0][x])[0],np.where(ind_circle2[1]==ind_circle[1][x])[0]) for x in range(len(ind_circle[1]))]).reshape(1,-1))[0]
+      
+        indicey=  list(ind_circle2[0]) 
+        indicex= list(ind_circle2[1])
+    
+        for k in range(len(del_list)):
+    
+            del indicex[del_list[k]]
+            del indicey[del_list[k]]        
+    
+        values_t=self.final_map[ind_circle[0],ind_circle[1]]
+        values=self.final_map[indicey,indicex]
+    
+        mean_values = np.mean(values)
+        #values_t=abs(values_t-mean_values)
+        values=abs(values-mean_values)
+        
+        self.ncore=ncore_temp
+        
+        if loss_func=='value':
+            if opti=='bayesian':
+                return param,1/np.mean(values_t)
+            elif opti=='interval':
+                return np.mean(values_t)*norma_factor[1]
+            else:
+                return np.mean(values_t)
+        elif loss_func=='prob':
+            mean_values = np.mean(values)
+            bap=np.sqrt((np.std(values)**2)/2)
+            if opti=='bayesian':
+                return param,1/(np.sum(np.abs(values_t-mean_values)/bap)) 
+            else:               
+                return np.sum(np.abs(values_t-mean_values)/bap)
+    
+        
+    def target_charact(self,expected_pos,psf_oa=None, ns=1, loss_func='value',optimisation_model='PSO',param_optimisation={'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10,'opti_iter':15,'ini_esti':10,'random_search':100},photo_bound=[1e-5,1e-4,10],ci_esti=None,first_guess=False):
+    
+        
+        """
+        Planet characterization algorithm relying on the RSM framework and the negative
+        fake companion approach. The function provides both the estimated astrometry
+        and photometry of a planetary candidate as well as the associated error.
+        (for more details see Dahlqvist et al. 2021)
+        
+        Parameters
+        ----------
+        expected_pos: list or ndarray
+            (Y,X) position of the detected planetary candidate.
+        psf_oa: bool, optional
+            Saturated PSF of the host star used to compute the scaling factor allowing the 
+            conversion between contrasts and fluxes. If no Saturated PSF is provided, the 
+            photometry will be provided in terms of flux not contrast. 
+            Default is None.
+        ns: float , optional
+            Number of regime switches. Default is one regime switch per annulus but 
+            smaller values may be used to reduce the impact of noise or disk structures
+            on the final RSM probablity map. The number of regime switches my be increase
+            in the case of faint sources to ease their characterization. Default is 1.
+        loss_func: str, optional
+            Loss function used for the computation of the source astrometry and photometry.
+            If 'value', it relies on the minimization of the average probability within a 2
+            FWHM aperture centered on the expected position of the source. If 'prob', it
+            considers the entire annulus for the computation of the background noise statistics
+            and use a Gaussian distribution to determine the probability that the probabilities
+            associated with the planetary candidates in the detection map belongs to the 
+            background noise distribution. Default is 'value'.
+        optimisation_model: str, optional
+            Approach used for the astrometry and photometry estimation (minimisation 
+            of the probabilities within a 2 FWHM aperture centered on the detected source).
+            The optimization is done either via a Bayesian approach ('Bayesian') or using
+            Particle Swarm optimization('PSO'). Default is PSO.
+        param_optimisation: dict, optional
+            dictionnary regrouping the parameters used by the Bayesian or the PSO optimization
+            framework. For the Bayesian optimization we have 'opti_iter' the number of iterations,
+            ,'ini_esti' number of sets of parameters for which the loss function is computed to
+            initialize the Gaussian process, random_search the number of random searches for the
+            selection of the next set of parameters to sample based on the maximisation of the 
+            expected immprovement. For the PSO optimization, 'w' is the inertia factor, 'c1' is
+            the cognitive factor and 'c2' is the social factor, 'n_particles' is the number of
+            particles in the swarm (number of point tested at each iteration), 'opti_iter' the 
+            number of iterations,'ini_esti' number of sets of parameters for which the loss
+            function is computed to initialize the PSO. {'c1': 1, 'c2': 1, 'w':0.5,'n_particles':10
+            ,'opti_iter':15,'ini_esti':10,'random_search':100}
+        photo_bound: list, optional
+            Photometry range considered during the estimation. The range, expressed in terms of
+            contrast (or flux if psf_oa is not provided), is given by the first two number, while
+            the third number gives the number of tested values within this range. Default [1e-5,1e-4,10].
+        ci_esti: str, optional
+            Parameters determining if a confidence interval should be computed for the photometry
+            and astrometry.The erros associated with the photometry and astrometry can be estimated
+            via the inversion of the hessian matrix ('hessian') or via the BFGS minimisation approach 
+            ('BFGS') which allows to further improve the precision of the estimates but requires 
+            more computation time. Default is None, implying no computation of confidence intervals.
+        first_guess: boolean, optional
+            Define if an initialisation of the algorrithm is done via a standard negfc (using the VIP
+            function firstguess) before applying the PSO or Bayesian optimisation. This initialisation
+            is useful when the target is very bright. It relies on PCA approach, SNR ratio maps and
+            negative fake companion injection to estimate the photometry and astrometry. Default is
+            False.
+        
+        Returns
+        ----------
+        List containing, the photometry, the astrometry expressed in pixel and in angular distance 
+        (mas) and angular position (°), as well as the errors associated with the photometry and
+        astrometry at 68% (one standard deviation) and at 95% if ci_esti is 'hessian' or 'BFGS'.
+        In the first case the order is:
+        [photometry,centroid position y,centroid position x, radial distance, angular position]
+        and in the second case:
+        [photometry,centroid position y,centroid position x, photometry standar error, position y
+        standard error,position x standard error, photometry 95% error, position y 95% error,
+        position x 95% error  radial distance, angular position]
+        
+        """ 
+        
+        if self.opti_sel==None:
+            mod_sel=[[0,0]]*(len(self.cube)*len(self.model))
+            it=0
+            for i in range(len(self.cube)):
+                for j in range(len(self.model)):
+                    mod_sel[it]=[i,j]
+                    it+=1
+            self.opti_sel=list([mod_sel]*(self.maxradius+1))
+        
+        minradius_temp=np.copy(self.minradius)
+        maxradius_temp=np.copy(self.maxradius)
+        cube=self.cube.copy()
+        scaling_factor=[]
+    
+        for i in range(len(self.psf)):
+    
+            if psf_oa is not None:
+                indices = get_annulus_segments(self.psf[i],0,round((self.fwhm)/2),1) 
+                indices_oa = get_annulus_segments(psf_oa[i],0,round((self.fwhm)/2),1) 
+                scaling_factor.append(psf_oa[i][indices_oa[0][0], indices_oa[0][1]].sum()/self.psf[i][indices[0][0], indices[0][1]].sum())
+    
+            else:
+                scaling_factor.append(1)
+    
+        ceny, cenx = frame_center(cube[0])
+    
+        an_center=np.sqrt((expected_pos[0]-ceny)**2+(expected_pos[1]-cenx)**2)
+    
+        a=int(an_center)
+    
+        self.minradius=a-round(self.fwhm)
+        self.maxradius=a+round(self.fwhm)
+    
+        self.opti_map(estimator='Forward-Backward',ns=ns,colmode='median',threshold=False,verbose=False) 
+        #plot_frames(self.final_map)
+        indc = disk((expected_pos[0], expected_pos[1]),2*int(self.fwhm)+1)
+        centroid_y,centroid_x=np.where(self.final_map == np.amax(self.final_map[indc[0],indc[1]]))
+        print("Peak value: "+"cartesian Y {}".format(centroid_y[0])+", X {}".format(centroid_x[0]))
+    
+        psf_subimage, suby, subx = vip.var.get_square(self.final_map, 19,
+                                                  centroid_y[0],centroid_x[0], position=True)       
+        y, x = np.indices(psf_subimage.shape)
+    
+        y=y.flatten()
+        x=x.flatten()
+        psf_subimage=psf_subimage.flatten()
+    
+        model_fit = lmfit.models.Gaussian2dModel()
+        params = model_fit.guess(psf_subimage, x, y)
+        result = model_fit.fit(psf_subimage, x=x, y=y, params=params)
+    
+        centroid_x=result.params['centerx'].value+ subx        
+        centroid_y=result.params['centery'].value+ suby
+        erry=result.params['centery'].stderr
+        errx=result.params['centerx'].stderr
+    
+        print("First guess astrometry: "+"cartesian Y {}".format(centroid_y)+", X {}".format(centroid_x)+", Error Y {}".format(erry)+", Error X {}".format(errx))  
+    
+        expected_pos=np.copy([centroid_y,centroid_x]) 
+    
+        from vip_hci.negfc import firstguess
+        #from vip_hci.negfc import firstguess_from_coord 
+        if first_guess==True:
+            ini_flux=[]
+            ini_posy=[]
+            ini_posx=[]
+            for i in range(len(self.psf)):
+                step=(np.log10(photo_bound[1])-np.log10(photo_bound[0]))/(photo_bound[2]*2)
+                flux_list=np.power(np.repeat(10,photo_bound[2]*2+1),
+            np.array(np.arange(np.log10(photo_bound[0]),np.log10(photo_bound[1])+step,step))[:photo_bound[2]*2+1])
+                temp_res = firstguess(cube[i], self.pa[i], self.psf[i], ncomp=20, plsc=self.pxscale,
+                                       planets_xy_coord=[(centroid_x,centroid_y)], fwhm=self.fwhm, 
+                                      f_range=flux_list*scaling_factor[i], annulus_width=5, aperture_radius=2,
+                                           imlib = 'opencv',interpolation= 'lanczos4', simplex=True, 
+                                       plot=False, verbose=False)
+    
+                ini_flux.append(temp_res[2]/scaling_factor[i])
+                posy_fc= ceny+temp_res[0] * np.sin(np.deg2rad(temp_res[1]))
+                posx_fc = cenx+temp_res[0] * np.cos(np.deg2rad(temp_res[1]))
+                ini_posy.append(posy_fc)
+                ini_posx.append(posx_fc)    
+            curr_flux=np.mean(ini_flux)
+            centroid_y=np.mean(ini_posy)
+            centroid_x=np.mean(ini_posx)
+            lower_b_flux=10**(np.log10(curr_flux)-step)
+            upper_b_flux=10**(np.log10(curr_flux)+step)
+            
+            print("Initial astrometry: "+"cartesian Y {}".format(centroid_y)+", X {}".format(centroid_x))
+    
+        if first_guess==False or abs(expected_pos[0]-centroid_y)>2 or abs(expected_pos[1]-centroid_x)>2:
+            step=(np.log10(photo_bound[1])-np.log10(photo_bound[0]))/photo_bound[2]
+            flux_list=np.power(np.repeat(10,photo_bound[2]+1),
+        np.array(np.arange(np.log10(photo_bound[0]),np.log10(photo_bound[1])+step,step))[:photo_bound[2]+1])
+            args=(0,expected_pos,cube,ns, 'value',scaling_factor,'photo')   
+            res_list=pool_map(self.ncore, self.estimate_flux_negfc, iterable(flux_list.T),*args)
+    
+            curr_flux=flux_list[np.argmin(np.array(res_list))]
+            if np.argmin(np.array(res_list))==(len(flux_list)-1):
+                print('Upper bound reached, consider an extension of the upper bound.')
+                upper_b_flux=10**(np.log10(photo_bound[1])+step)
+            else:
+                upper_b_flux=flux_list[np.argmin(np.array(res_list))+1]
+            if np.argmin(np.array(res_list))==0:
+                print('Lower bound reached, consider an extension of the lower bound.')
+                lower_b_flux=10**(np.log10(photo_bound[0])-step)
+            else:
+                lower_b_flux=flux_list[np.argmin(np.array(res_list))-1]
+
+    
+        print("Inital estimated photometry {}".format(curr_flux))
+        
+        if abs(expected_pos[0]-centroid_y)>2 or abs(expected_pos[1]-centroid_x)>2:
+            centroid_y,centroid_x=expected_pos
+        else:
+            expected_pos=[centroid_y,centroid_x]
+
+    
+        if optimisation_model=='Bayesian':
+    
+            opti_param,max_val=bayesian_optimization(self.estimate_flux_negfc,np.array([[lower_b_flux,upper_b_flux],[expected_pos[0]-1,expected_pos[0]+1],[expected_pos[1]-1,expected_pos[1]+1]]), ['float','float','float'],args=(0,expected_pos,cube,ns,loss_func,scaling_factor,'bayesian'),n_random_esti=param_optimisation['ini_esti'], n_iters=param_optimisation['opti_iter'],multi_search=self.ncore,random_search=True,n_restarts=param_optimisation['random_search'],ncore=self.ncore)
+    
+            expected_pos=opti_param[1:3]
+            curr_flux=opti_param[0]
+            print("Initial estimated astrometry {}".format(expected_pos))
+            print("Initial estimated photometry {}".format(curr_flux))
+            centroid_y,centroid_x=opti_param[1:3]
+    
+    
+        elif optimisation_model=='PSO':
+    
+            my_topology = Star() # The Topology Class
+            my_options_start={'c1': param_optimisation['c1'], 'c2': param_optimisation['c2'], 'w':param_optimisation['w']}
+            my_options_end = {'c1': param_optimisation['c1'], 'c2': param_optimisation['c2'], 'w': param_optimisation['w']}
+    
+             # The Swarm Class
+            kwargs=dict(level=curr_flux/10**(int(np.log10(curr_flux))-1),expected_pos=expected_pos,cube=cube,ns=ns,loss_func=loss_func,scaling_factor=scaling_factor,opti='interval',norma_factor=[10**(int(np.log10(curr_flux))-1),1])
+    
+            bounds=([lower_b_flux/10**(int(np.log10(curr_flux))-1),expected_pos[0]-1,expected_pos[1]-1],[upper_b_flux/10**(int(np.log10(curr_flux))-1),expected_pos[0]+1,expected_pos[1]+1])
+            params=[]
+            for i in range(len(bounds[0])):
+    
+                params.append(np.random.uniform(bounds[0][i], bounds[1][i], (param_optimisation['ini_esti'])))
+    
+            params=np.append(np.array(params).T,[[curr_flux/10**(int(np.log10(curr_flux))-1),expected_pos[0],expected_pos[1]]],0)
+    
+    
+            ini_cost=self.multi_estimate_flux_negfc(params,**kwargs)
+    
+            ini_position=params[ini_cost<np.sort(ini_cost)[param_optimisation['n_particles']],:]
+    
+            my_swarm = P.create_swarm(n_particles=param_optimisation['n_particles'], dimensions=3, options=my_options_start, bounds=([lower_b_flux/10**(int(np.log10(curr_flux))-1),centroid_y-1,centroid_x-1],[upper_b_flux/10**(int(np.log10(curr_flux))-1),centroid_y+1,centroid_x+1]),init_pos=ini_position)
+            my_swarm.bounds=([lower_b_flux/10**(int(np.log10(curr_flux))-1),centroid_y-1,centroid_x-1],[upper_b_flux/10**(int(np.log10(curr_flux))-1),centroid_y+1,centroid_x+1])
+            my_swarm.velocity_clamp=None
+            my_swarm.vh=P.handlers.VelocityHandler(strategy="unmodified")
+            my_swarm.bh=P.handlers.BoundaryHandler(strategy="periodic")
+            my_swarm.current_cost=ini_cost[ini_cost<np.sort(ini_cost)[param_optimisation['n_particles']]]
+            my_swarm.pbest_cost = my_swarm.current_cost
+    
+            iterations = param_optimisation['opti_iter'] # Set 100 iterations
+    
+            for i in range(iterations):
+                # Part 1: Update personal best
+                if i!=0:
+                    my_swarm.current_cost = self.multi_estimate_flux_negfc(my_swarm.position,**kwargs) # Compute current c        ost
+    
+                my_swarm.pbest_pos, my_swarm.pbest_cost = P.compute_pbest(my_swarm) # Update and store
+    
+                my_swarm.options={'c1': my_options_start['c1']+i*(my_options_end['c1']-my_options_start['c1'])/(iterations-1), 'c2': my_options_start['c2']+i*(my_options_end['c2']-my_options_start['c2'])/(iterations-1), 'w': my_options_start['w']+i*(my_options_end['w']-my_options_start['w'])/(iterations-1)}
+                # Part 2: Update global best
+                # Note that gbest computation is dependent on your topology
+                if np.min(my_swarm.pbest_cost) < my_swarm.best_cost:
+                    my_swarm.best_pos, my_swarm.best_cost = my_topology.compute_gbest(my_swarm)
+    
+                # Let's print our output
+    
+                print('Iteration: {} | my_swarm.best_cost: {}'.format(i+1, my_swarm.best_cost))
+    
+            # Part 3: Update position and velocity matrices
+        # Note that position and velocity updates are dependent on your topology
+                my_swarm.velocity = my_topology.compute_velocity(my_swarm, my_swarm.velocity_clamp, my_swarm.vh, my_swarm.bounds
+                )
+                my_swarm.position = my_topology.compute_position(my_swarm, my_swarm.bounds, my_swarm.bh
+                )
+    
+            expected_pos=my_swarm.best_pos[1:3]
+            centroid_y,centroid_x=expected_pos
+            curr_flux=my_swarm.best_pos[0]*10**(int(np.log10(curr_flux))-1)
+            max_val=my_swarm.best_cost
+    
+    
+        print("Optimal astrometry {}".format(i+1)+" {}".format(expected_pos))
+        print("Optimal photometry {}".format(i+1)+" {}".format(curr_flux))
+    
+        if ci_esti is None:
+            
+            self.minradius=minradius_temp
+            self.maxradius=maxradius_temp
+            self.cube=cube
+            
+            ceny, cenx = frame_center(cube[0])
+            rad_dist= np.sqrt((centroid_y-ceny)**2+(centroid_x-cenx)**2)*self.pxscale*1000
+            theta=np.degrees(np.arctan2(centroid_y-ceny, centroid_x-cenx))
+            print("Estimated astrometry: "+"radial distance {}".format(rad_dist)+" mas, Angle {}".format(theta))
+    
+            
+            return curr_flux,centroid_y,centroid_x,rad_dist,theta
+        else:
+            print("Confidence interval computation")  
+    
+            int95=[1,1,1]
+            if ci_esti=='hessian':
+                power_curr_flux=10**(int(np.log10(curr_flux))-1)
+                fun = lambda param: self.estimate_flux_negfc(param,curr_flux/power_curr_flux,expected_pos,cube,ns,loss_func,scaling_factor,'interval',[power_curr_flux,10**(-round(np.log10(max_val)))])   
+                opti_param, hessian = Hessian([curr_flux/power_curr_flux,expected_pos[0],expected_pos[1]],fun,step=0.05)   
+                curr_flux,expected_pos[0],expected_pos[1]=opti_param
+                curr_flux*=power_curr_flux
+                std=np.nan_to_num(np.sqrt(np.diag(np.linalg.inv(hessian))))
+                int95=sc.stats.norm.ppf(0.95)*std
+            elif ci_esti=='BFGS' or any(int95==0):
+                res=minimize(self.estimate_flux_negfc,x0=[opti_param[0]/10**(int(np.log10(curr_flux))-1),opti_param[1],opti_param[2]], method='L-BFGS-B',bounds=((lower_b_flux/10**(int(np.log10(curr_flux))-1),upper_b_flux/10**(int(np.log10(curr_flux))-1)),(opti_param[1]-0.2,opti_param[1]+0.2),(opti_param[2]-0.2,opti_param[2]+0.2)),args=(curr_flux/10**(int(np.log10(curr_flux))-1),expected_pos,cube,ns,loss_func,scaling_factor,'interval',[10**(int(np.log10(curr_flux))-1),10**(-round(np.log10(max_val)))]),options={'ftol':5e-3,'gtol':5e-4, 'eps': 1e-2, 'maxiter': 10, 'finite_diff_rel_step': [1e-2,1e-2,1e-2]})
+                std=np.nan_to_num(np.sqrt(np.diag(res['hess_inv'].todense())))
+                int95=sc.stats.norm.ppf(0.95)*std
+                curr_flux=res.x[0]*10**(int(np.log10(curr_flux))-1)
+                expected_pos=res.x[1:3]
+    
+            err_phot=std[0]*10**(int(np.log10(curr_flux))-1)
+            int95[0]*=10**(int(np.log10(curr_flux))-1)
+            erry=std[1]
+            errx=std[2]
+            centroid_y,centroid_x=expected_pos
+    
+            print("Estimated photometry: "+" {}".format(curr_flux)+", Error {}".format(err_phot))
+    
+    
+            print("Estimated astrometry: "+"Cartesian Y {}".format(centroid_y)+", X {}".format(centroid_x)+", Error Y {}".format(erry)+", Error X {}".format(errx))  
+    
+            ceny, cenx = frame_center(cube[0])
+            rad_dist= np.sqrt((centroid_y-ceny)**2+(centroid_x-cenx)**2)*self.pxscale*1000
+            theta=np.degrees(np.arctan2(centroid_y-ceny, centroid_x-cenx))
+            print("Estimated astrometry: "+"radial distance {}".format(rad_dist)+" mas, Angle {}".format(theta))
+    
+            self.minradius=minradius_temp
+            self.maxradius=maxradius_temp
+            self.cube=cube
+            
+            return curr_flux,centroid_y,centroid_x,err_phot,erry,errx,int95[0],int95[1],int95[2],rad_dist,theta
+            
+
+
+
+                                               
+        
+

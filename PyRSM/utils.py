@@ -1,14 +1,14 @@
 """
-Set of functions used by the PyRSM class to compute detection maps and optimize the parameters
-of the RSM algorithm and PSF-subtraction techniques via the auto-RSM and auto-S/N frameworks
+Set of functions used by the PyRSM class to compute detection maps, optimize the parameters
+of the RSM algorithm and PSF-subtraction techniques via the auto-RSM and auto-S/N frameworks,
+generate contrast curves, and characterise detected astrophysical signals.
 """
 __author__ = 'Carl-Henrik Dahlqvist'
 
 from scipy.interpolate import Rbf
 import pandas as pd
 import numpy.linalg as la
-from vip_hci.var import get_annulus_segments, frame_center,prepare_matrix
-from vip_hci.preproc.derotation import _define_annuli
+from vip_hci.var import get_annulus_segments, frame_center,prepare_matrix,cube_filter_highpass
 import numpy as np
 from vip_hci.preproc import cube_derotate, cube_collapse, check_pa_vector,check_scal_vector
 from vip_hci.preproc.derotation import _find_indices_adi
@@ -19,9 +19,11 @@ from vip_hci.conf.utils_conf import pool_map, iterable
 from vip_hci.pca.svd import get_eigenvectors
 from vip_hci.llsg.llsg import _patch_rlrps
 from vip_hci.preproc import cube_rescaling_wavelengths as scwave
-import vip_hci as vip
-from sklearn.decomposition import NMF as NMF_sklearn
- 
+from sklearn.decomposition import NMF
+import sklearn.gaussian_process as gp
+from scipy.stats import norm
+from scipy.optimize import minimize
+
 def check_delta_sep(scale_list,delta_sep,minradius,fwhm,c):
     wl = np.asarray(scale_list)
     wl_ref = wl[len(wl)//2]
@@ -117,6 +119,25 @@ def rot_scale(step,cube,cube_scaled,angle_list,scale_list, imlib, interpolation)
             cube_derotated=cube_derotate(cube_scaled,angle_list, interpolation=interpolation,imlib=imlib)
             
             return cube_derotated
+
+def _define_annuli(angle_list, ann, n_annuli, fwhm, radius_int, annulus_width,
+                   delta_rot, n_segments, verbose, strict=False):
+    """ Function that defines the annuli geometry using the input parameters.
+    Returns the parallactic angle threshold, the inner radius and the annulus
+    center for each annulus. Function taken from python package VIP_HCI (Gomez et al. 2017).
+    """
+    if ann == n_annuli - 1:
+        inner_radius = radius_int + (ann * annulus_width - 1)
+    else:
+        inner_radius = radius_int + ann * annulus_width
+    ann_center = inner_radius + (annulus_width / 2)
+    pa_threshold = np.rad2deg(2 * np.arctan(delta_rot * fwhm / (2 * ann_center)))
+    mid_range = np.abs(np.amax(angle_list) - np.amin(angle_list)) / 2
+    if pa_threshold >= mid_range - mid_range * 0.1:
+        pa_threshold = float(mid_range - mid_range * 0.1)
+
+    return pa_threshold, inner_radius, ann_center
+
     
     
 def remove_outliers(time_s, range_sel, k=5, t0=3):
@@ -285,7 +306,7 @@ def perturb(frame,model_matrix,numbasis,evals_matrix, evecs_matrix, KL_basis_mat
 
 
 
-def KLIP(cube, angle_list, nann=None, local=False, fwhm=4, asize=2, n_segments=1,delta_rot=1, ncomp=1,min_frames_lib=2, max_frames_lib=200,imlib='opencv',nframes=None, interpolation='lanczos4', collapse='median',full_output=False, verbose=1):
+def KLIP(cube, angle_list, nann=None, local=False,radius_int=None,radius_out=None, fwhm=4, asize=2, n_segments=1,delta_rot=1, ncomp=1,min_frames_lib=2, max_frames_lib=200,imlib='opencv',nframes=None, interpolation='lanczos4', collapse='median',full_output=False, verbose=1):
 
     """
     Function allowing the estimation of the cube of residuals after
@@ -309,7 +330,7 @@ def KLIP(cube, angle_list, nann=None, local=False, fwhm=4, asize=2, n_segments=1
         
     # Annulus parametrization 
     
-    radius_int=fwhm
+
     if local==True:
             if nann> 2*annulus_width:
                 n_annuli = 5
@@ -318,7 +339,29 @@ def KLIP(cube, angle_list, nann=None, local=False, fwhm=4, asize=2, n_segments=1
                 n_annuli = 4 
                 radius_int=(nann//annulus_width-1)*annulus_width
     else:
+        if radius_int%asize>int(asize/2):
+            radius_int=(radius_int//asize)*asize
+        elif radius_int>=asize:
+            radius_int=(radius_int//asize-1)*asize
+        else:
+            radius_int=0
+            
+        if radius_out is not None:
+            
+            if radius_out%asize>int(asize/2):
+                radius_out=(radius_out//asize+2)*asize
+            else:
+                radius_out=(radius_out//asize+1)*asize
+            
+            n_annuli = int((radius_out - radius_int) / asize)
+            
+        elif radius_out==None:
             n_annuli = int((y / 2 - radius_int) / asize)
+        
+        elif radius_out>int(y / 2): 
+            
+            n_annuli = int((y / 2 - radius_int) / asize)
+        
             
     # Definition of the number of segment for the diifferent annuli
 
@@ -501,52 +544,6 @@ def LOCI_FM(cube, psf, ann_center, angle_list,scale_list, asize,fwhm, Tol,delta_
     return cube_res, ind_ref_list,coef_list
 
 
-def nmf_adisdi(cube, angle_list,scale_list=None, cube_ref=None, ncomp=1, scaling=None, max_iter=100,
-        random_state=None, mask_center_px=None, imlib='opencv',
-        interpolation='lanczos4', collapse='median', full_output=False,
-        verbose=True, **kwargs):
-    """ Non Negative Matrix Factorization for ADI or ADI+SDI sequences.This function embeds the 
-    scikit-learn NMF algorithm solved through coordinate descent method.     
-    """
-    
-    array,angle_list_t,scale_list_t=rot_scale('ini',cube,None,angle_list,scale_list,imlib, interpolation)
-            
-
-
-    n, y, x = array.shape
-    
-    matrix = prepare_matrix(array, scaling, mask_center_px, mode='fullfr',
-                            verbose=verbose)
-    matrix += np.abs(matrix.min())
-    if cube_ref is not None:
-        matrix_ref = prepare_matrix(cube_ref, scaling, mask_center_px,
-                                    mode='fullfr', verbose=verbose)
-        matrix_ref += np.abs(matrix_ref.min())
-           
-    mod = NMF_sklearn(n_components=ncomp, alpha=0, solver='cd', init='nndsvd', 
-              max_iter=max_iter, random_state=random_state, **kwargs) 
-    
-    # H [ncomp, n_pixels]: Non-negative components of the data
-    if cube_ref is not None:
-        H = mod.fit(matrix_ref).components_
-    else:
-        H = mod.fit(matrix).components_          
-    
-    # W: coefficients [n_frames, ncomp]
-    W = mod.transform(matrix)
-        
-    reconstructed = np.dot(W, H)
-    residuals = matrix - reconstructed
-               
-    array_out = np.zeros_like(array)
-    for i in range(n):
-        array_out[i] = residuals[i].reshape(y,x)
-            
-    cube_der=rot_scale('fin',cube,array_out,angle_list_t,scale_list_t, imlib, interpolation)
-    frame_fin = cube_collapse(cube_der, mode=collapse)
-    
-    return cube_der,frame_fin
-
 
 def annular_NMF(cube, angle_list, nann=None, local=False, fwhm=4, asize=2, n_segments=1, ncomp=20,imlib='opencv', interpolation='lanczos4', collapse='median',max_iter=100,
         random_state=None,full_output=False, verbose=False):
@@ -622,7 +619,52 @@ def annular_NMF(cube, angle_list, nann=None, local=False, fwhm=4, asize=2, n_seg
         return frame
     
 
-def NMF_patch(matrix, ncomp, max_iter,random_state,sklearn=False):
+
+def nmf_adisdi(cube, angle_list,scale_list=None, cube_ref=None, ncomp=1, scaling=None, max_iter=100,
+        random_state=None, mask_center_px=None, imlib='opencv',
+        interpolation='lanczos4', collapse='median', full_output=False,
+        verbose=True, **kwargs):
+    """ Non Negative Matrix Factorization for ADI or ADI+SDI sequences.This function embeds the 
+    scikit-learn NMF algorithm solved through coordinate descent method.     
+    """
+    
+    array,angle_list_t,scale_list_t=rot_scale('ini',cube,None,angle_list,scale_list,imlib, interpolation)
+            
+
+
+    n, y, x = array.shape
+    
+    matrix_ref = prepare_matrix(array, scaling, mask_center_px, mode='fullfr',
+                            verbose=verbose)
+    matrix_ref += np.abs(matrix_ref.min())
+    if cube_ref is not None:
+        matrix_ref = prepare_matrix(cube_ref, scaling, mask_center_px,
+                                    mode='fullfr', verbose=verbose)
+        matrix_ref += np.abs(matrix_ref.min())
+ 
+      
+    mod = NMF(n_components=ncomp, solver='cd', init='nndsvd', 
+              max_iter=max_iter, random_state=100,tol=1e-3)  
+
+    W = mod.fit_transform(matrix_ref)
+    H = mod.components_
+
+    
+    reconstructed = np.dot(W, H)
+    residuals = matrix_ref - reconstructed
+               
+    array_out = np.zeros_like(array)
+    for i in range(n):
+        array_out[i] = residuals[i].reshape(y,x)
+            
+    cube_der=rot_scale('fin',cube,array_out,angle_list_t,scale_list_t, imlib, interpolation)
+    frame_fin = cube_collapse(cube_der, mode=collapse)
+    
+    return cube_der,frame_fin
+
+
+
+def NMF_patch(matrix, ncomp, max_iter,random_state):
 
     """
     Function allowing the computation via NMF of the speckle field for a 
@@ -632,62 +674,24 @@ def NMF_patch(matrix, ncomp, max_iter,random_state,sklearn=False):
 
     refs = matrix+ np.abs(matrix.min())
     
-    if sklearn==True:
-        
-        mod = NMF_sklearn(n_components=ncomp, alpha=0, solver='cd', init='nndsvd', 
-                  max_iter=max_iter, random_state=random_state) 
-        
-        # H [ncomp, n_pixels]: Non-negative components of the data
-        
-        H = mod.fit(refs).components_          
+
     
-        W = mod.transform(refs)
-            
-        reconstructed = np.dot(W, H)
+    mod = NMF(n_components=ncomp, solver='cd', init='nndsvd', 
+              max_iter=max_iter, random_state=100,tol=1e-3)  
+
+    W = mod.fit_transform(refs)
+    H = mod.components_
+
     
-    else:
-        
-        mod = NMF(X=refs, n_components=ncomp)
-        
-        mod.SolveNMF(maxiters=max_iter, tol=0.001)
-    
-    
-        H=mod.H
-        W=mod.W
-        reconstructed = np.dot(W, H)
-        
+    reconstructed = np.dot(W, H)
+
     residuals = refs - reconstructed
 
     return residuals
 
-def NMF_patch_range(matrix, ncomp_range, max_iter,random_state,verbose):
-
-    """
-    Function allowing the computation via NMF of the speckle field for a range of principal 
-    components ncomp_range and a given sub-region of the original ADI sequence. The code is a
-    partial reproduction of the VIP function NMF_patch (Gonzalez et al. AJ, 154:7,2017)
-    """
 
 
-    refs = matrix+ np.abs(matrix.min())
-
-    mod = NMF(X=refs, n_components=ncomp_range[len(ncomp_range)-1])
-    
-    mod.SolveNMF(maxiters=max_iter, tol=0.001)
-
-    if verbose:  
-        print('Done NMF with sklearn.NMF.')
-
-    residuals=[]
-    for i in ncomp_range:
-        H=mod.H[ncomp_range[0]:i,:]
-        W=mod.W[:,ncomp_range[0]:i]
-        reconstructed = np.dot(W, H)
-        residuals.append(refs - reconstructed)
-
-    return residuals
-
-def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0, fwhm=4, asize=2, n_segments=1,
+def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0,radius_out=None, fwhm=4, asize=2, n_segments=1,
                  delta_rot=1,delta_sep=0.1, ncomp=1, svd_mode='lapack', nproc=None,
                  min_frames_lib=2, max_frames_lib=200, tol=1e-1, scaling=None,
                  imlib='opencv', interpolation='lanczos4', collapse='median',
@@ -700,8 +704,30 @@ def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0, fwhm=4, a
     n, y, _ = array.shape
 
     angle_list_t = check_pa_vector(angle_list_t)
-    n_annuli = int((y / 2 - radius_int) / asize)
-
+    
+    if radius_int%asize>int(asize/2):
+        radius_int=(radius_int//asize)*asize
+    elif radius_int>=asize:
+        radius_int=(radius_int//asize-1)*asize
+    else:
+        radius_int=0
+        
+    if radius_out is not None:
+        
+        if radius_out%asize>int(asize/2):
+            radius_out=(radius_out//asize+2)*asize
+        else:
+            radius_out=(radius_out//asize+1)*asize
+        
+        n_annuli = int((radius_out - radius_int) / asize)
+        
+    elif radius_out==None:
+        n_annuli = int((y / 2 - radius_int) / asize)
+    
+    elif radius_out>int(y / 2): 
+        
+        n_annuli = int((y / 2 - radius_int) / asize)
+ 
     if isinstance(delta_rot, tuple):
         delta_rot = np.linspace(delta_rot[0], delta_rot[1], num=n_annuli)
     elif isinstance(delta_rot, (int, float)):
@@ -730,6 +756,7 @@ def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0, fwhm=4, a
     # The annuli are built, and the corresponding PA thresholds for frame
     # rejection are calculated (at the center of the annulus)
     cube_out = np.zeros_like(array)
+    
     for ann in range(n_annuli):
         if isinstance(ncomp, tuple) or isinstance(ncomp, np.ndarray):
             if len(ncomp) == n_annuli:
@@ -752,7 +779,6 @@ def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0, fwhm=4, a
             yy = indices[j][0]
             xx = indices[j][1]
             matrix_segm = array[:, yy, xx]  # shape [nframes x npx_segment]
-
             if cube_ref is not None:
                 matrix_segm_ref = cube_ref[:, yy, xx]
             else:
@@ -762,13 +788,11 @@ def annular_pca_adisdi(cube, angle_list,scale_list=None, radius_int=0, fwhm=4, a
                            angle_list_t,scale_list_t, fwhm, pa_thr,delta_sep, ann_center, svd_mode,
                            ncompann, min_frames_lib, max_frames_lib, tol,
                            matrix_segm_ref)
-
             res = np.array(res)
             residuals = np.array(res[:, 0])
 
             for fr in range(n):
                 cube_out[fr][yy, xx] = residuals[fr]
-
 
     # Cube is derotated according to the parallactic angle and collapsed
     cube_der=rot_scale('fin',cube,cube_out,angle_list_t,scale_list_t, imlib, interpolation)
@@ -846,7 +870,7 @@ def do_pca_patch_range(matrix, frame, angle_list,scale_list, fwhm, pa_threshold,
 
          
 def loci_adisdi(cube, angle_list,scale_list=None, fwhm=4, metric='manhattan',
-                 dist_threshold=50, delta_rot=0.5,delta_sep=0.1, radius_int=0, asize=4,
+                 dist_threshold=50, delta_rot=0.5,delta_sep=0.1, radius_int=0,radius_out=None, asize=4,
                  n_segments=1, nproc=1, solver='lstsq', tol=1e-3,
                  optim_scale_fact=1, imlib='opencv', interpolation='lanczos4',
                  collapse='median', nann=None,local=False, verbose=True, full_output=False):
@@ -867,7 +891,30 @@ def loci_adisdi(cube, angle_list,scale_list=None, fwhm=4, metric='manhattan',
             n_annuli = 3 
             radius_int=nann-asize
     else:
-            n_annuli= int((y / 2 - radius_int) / asize)
+        if radius_int%asize>int(asize/2):
+            radius_int=(radius_int//asize)*asize
+        elif radius_int>=asize:
+            radius_int=(radius_int//asize-1)*asize
+        else:
+            radius_int=0
+            
+        if radius_out is not None:
+            
+            if radius_out%asize>int(asize/2):
+                radius_out=(radius_out//asize+2)*asize
+            else:
+                radius_out=(radius_out//asize+1)*asize
+            
+            n_annuli = int((radius_out - radius_int) / asize)
+        
+        elif radius_out==None:
+            n_annuli = int((y / 2 - radius_int) / asize)
+        
+        elif radius_out>int(y / 2): 
+            
+            n_annuli = int((y / 2 - radius_int) / asize)
+        
+            
     if verbose:
         print("Building {} annuli:".format(n_annuli))
 
@@ -1015,7 +1062,7 @@ def _leastsq_patch(ayxyx, angle_list,scale_list,fwhm,cube, nann,metric, dist_thr
 def llsg_adisdi(cube, angle_list,scale_list, fwhm, rank=10, thresh=1, max_iter=10,
          low_rank_ref=False, low_rank_mode='svd', auto_rank_mode='noise',
          residuals_tol=1e-1, cevr=0.9, thresh_mode='soft', nproc=1,
-         asize=None, n_segments=4, azimuth_overlap=None, radius_int=None,
+         asize=None, n_segments=4, azimuth_overlap=None, radius_int=None,radius_out=None,
          random_seed=None, imlib='opencv', interpolation='lanczos4',
          high_pass=None, collapse='median', full_output=True, verbose=True,
          debug=False):
@@ -1026,23 +1073,280 @@ def llsg_adisdi(cube, angle_list,scale_list, fwhm, rank=10, thresh=1, max_iter=1
     
     cube_rot_scale,angle_list_t,scale_list_t=rot_scale('ini',cube,None,angle_list,scale_list,imlib, interpolation)
     
-    list_l, list_s, list_g, f_l, frame_fin, f_g = vip.llsg.llsg(cube_rot_scale, angle_list_t, fwhm, rank=rank,asize=asize, thresh=1,n_segments=n_segments, max_iter=40, random_seed=10, nproc=nproc,full_output=True,verbose=False)
+    list_l, list_s, list_g, f_l, frame_fin, f_g = llsg(cube_rot_scale, angle_list_t, fwhm, rank=rank,asize=asize,radius_int=radius_int,radius_out=radius_out,thresh=1,n_segments=n_segments, max_iter=40, random_seed=10, nproc=nproc,full_output=True,verbose=False)
     res_s=np.array(list_s)
     residuals_cube_=cube_derotate(res_s[0],-angle_list_t)
     cube_der=rot_scale('fin',cube,residuals_cube_,angle_list_t,scale_list_t, imlib, interpolation)
     frame_fin=cube_collapse(cube_der, collapse)
     return cube_der,frame_fin
+
+
+
+
+def llsg(cube, angle_list, fwhm, rank=10, thresh=1, max_iter=10,
+         low_rank_ref=False, low_rank_mode='svd', auto_rank_mode='noise',
+         residuals_tol=1e-1, cevr=0.9, thresh_mode='soft', nproc=1,
+         asize=None, n_segments=4, azimuth_overlap=None, radius_int=None, radius_out=None,
+         random_seed=None, imlib='opencv', interpolation='lanczos4',
+         high_pass=None, collapse='median', full_output=False, verbose=True,
+         debug=False):
+    """ Local Low-rank plus Sparse plus Gaussian-noise decomposition (LLSG) as
+    described in Gomez Gonzalez et al. 2016. This first version of our algorithm
+    aims at decomposing ADI cubes into three terms L+S+G (low-rank, sparse and
+    Gaussian noise). Separating the noise from the S component (where the moving
+    planet should stay) allow us to increase the SNR of potential planets.
+    The three tunable parameters are the *rank* or expected rank of the L
+    component, the ``thresh`` or threshold for encouraging sparsity in the S
+    component and ``max_iter`` which sets the number of iterations. The rest of
+    parameters can be tuned at the users own risk (do it if you know what you're
+    doing).
+    Parameters
+    ----------
+    cube : numpy ndarray, 3d
+        Input ADI cube.
+    angle_list : numpy ndarray, 1d
+        Corresponding parallactic angle for each frame.
+    fwhm : float
+        Known size of the FHWM in pixels to be used.
+    rank : int, optional
+        Expected rank of the L component.
+    thresh : float, optional
+        Factor that scales the thresholding step in the algorithm.
+    max_iter : int, optional
+        Sets the number of iterations.
+    low_rank_ref :
+        If True the first estimation of the L component is obtained from the
+        remaining segments in the same annulus.
+    low_rank_mode : {'svd', 'brp'}, optional
+        Sets the method of solving the L update.
+    auto_rank_mode : {'noise', 'cevr'}, str optional
+        If ``rank`` is None, then ``auto_rank_mode`` sets the way that the
+        ``rank`` is determined: the noise minimization or the cumulative
+        explained variance ratio (when 'svd' is used).
+    residuals_tol : float, optional
+        The value of the noise decay to be used when ``rank`` is None and
+        ``auto_rank_mode`` is set to ``noise``.
+    cevr : float, optional
+        Float value in the range [0,1] for selecting the cumulative explained
+        variance ratio to choose the rank automatically (if ``rank`` is None).
+    thresh_mode : {'soft', 'hard'}, optional
+        Sets the type of thresholding.
+    nproc : None or int, optional
+        Number of processes for parallel computing. If None the number of
+        processes will be set to cpu_count()/2. By default the algorithm works
+        in single-process mode.
+    asize : int or None, optional
+        If ``asize`` is None then each annulus will have a width of ``2*asize``.
+        If an integer then it is the width in pixels of each annulus.
+    n_segments : int or list of ints, optional
+        The number of segments for each annulus. When a single integer is given
+        it is used for all annuli.
+    azimuth_overlap : int or None, optional
+        Sets the amount of azimuthal averaging.
+    radius_int : int, optional
+        The radius of the innermost annulus. By default is 0, if >0 then the
+        central circular area is discarded.
+    random_seed : int or None, optional
+        Controls the seed for the Pseudo Random Number generator.
+    imlib : str, optional
+        See the documentation of the ``vip_hci.preproc.frame_rotate`` function.
+    interpolation : str, optional
+        See the documentation of the ``vip_hci.preproc.frame_rotate`` function.
+    high_pass : odd int or None, optional
+        If set to an odd integer <=7, a high-pass filter is applied to the
+        frames. The ``vip_hci.var.frame_filter_highpass`` is applied twice,
+        first with the mode ``median-subt`` and a large window, and then with
+        ``laplacian-conv`` and a kernel size equal to ``high_pass``. 5 is an
+        optimal value when ``fwhm`` is ~4.
+    collapse : {'median', 'mean', 'sum', 'trimmean'}, str optional
+        Sets the way of collapsing the frames for producing a final image.
+    full_output: bool, optional
+        Whether to return the final median combined image only or with other
+        intermediate arrays.
+    verbose : bool, optional
+        If True prints to stdout intermediate info.
+    debug : bool, optional
+        Whether to output some intermediate information.
+    Returns
+    -------
+    frame_s : numpy ndarray, 2d
+        Final frame (from the S component) after rotation and median-combination.
+    If ``full_output`` is True, the following intermediate arrays are returned:
+    list_l_array_der, list_s_array_der, list_g_array_der, frame_l, frame_s,
+    frame_g
+    """
+    if cube.ndim != 3:
+        raise TypeError("Input array is not a cube (3d array)")
+    if not cube.shape[0] == angle_list.shape[0]:
+        msg = "Angle list vector has wrong length. It must equal the number"
+        msg += " frames in the cube"
+        raise TypeError(msg)
+
+    if low_rank_mode == 'brp':
+        if rank is None:
+            msg = "Auto rank only works with SVD low_rank_mode."
+            msg += " Set a value for the rank parameter"
+            raise ValueError(msg)
+        if low_rank_ref:
+            msg = "Low_rank_ref only works with SVD low_rank_mode"
+            raise ValueError(msg)
+
+    if high_pass is not None:
+        cube_init = cube_filter_highpass(cube, 'median-subt', median_size=19,
+                                         verbose=False)
+        cube_init = cube_filter_highpass(cube_init, 'laplacian-conv',
+                                         kernel_size=high_pass, verbose=False)
+    else:
+        cube_init = cube
+
+    n, y, x = cube.shape
+
+    if azimuth_overlap == 0:
+        azimuth_overlap = None
+
+    if radius_int is None:
+        radius_int = 0
+
+    if nproc is None:
+        nproc = cpu_count() // 2        # Hyper-threading doubles the # of cores
+
+    # Same number of pixels per annulus
+    if asize is None:
+        annulus_width = int(np.ceil(2 * fwhm))  # as in the paper
+    elif isinstance(asize, int):
+        annulus_width = asize
+        
+    if radius_int%asize>int(asize/2):
+        radius_int=(radius_int//asize)*asize
+    elif radius_int>=asize:
+        radius_int=(radius_int//asize-1)*asize
+    else:
+        radius_int=0
+        
+    if radius_out is not None:
+        
+        if radius_out%asize>int(asize/2):
+            radius_out=(radius_out//asize+2)*asize
+        else:
+            radius_out=(radius_out//asize+1)*asize
+        
+        if radius_out>int(y / 2):
+            n_annuli = int((y / 2 - radius_int) / asize)
+        else:
+            n_annuli = int((radius_out - radius_int) / asize)
+        
+    else :
+        
+        n_annuli = int((y / 2 - radius_int) / asize)
+
+        
+
+    if n_segments is None:
+        n_segments = [4 for _ in range(n_annuli)]   # as in the paper
+    elif isinstance(n_segments, int):
+        n_segments = [n_segments]*n_annuli
+    elif n_segments == 'auto':
+        n_segments = []
+        n_segments.append(2)    # for first annulus
+        n_segments.append(3)    # for second annulus
+        ld = 2 * np.tan(360/4/2) * annulus_width
+        for i in range(2, n_annuli):    # rest of annuli
+            radius = i * annulus_width
+            ang = np.rad2deg(2 * np.arctan(ld / (2 * radius)))
+            n_segments.append(int(np.ceil(360/ang)))
+
+    if verbose:
+        print('Annuli = {}'.format(n_annuli))
+
+    # Azimuthal averaging of residuals
+    if azimuth_overlap is None:
+        azimuth_overlap = 360   # no overlapping, single config of segments
+    n_rots = int(360 / azimuth_overlap)
+
+    matrix_s = np.zeros((n_rots, n, y, x))
+    if full_output:
+        matrix_l = np.zeros((n_rots, n, y, x))
+        matrix_g = np.zeros((n_rots, n, y, x))
+
+    # Looping the he annuli
+    if verbose:
+        print('Processing annulus: ')
+    for ann in range(n_annuli):
+        inner_radius = radius_int + ann * annulus_width
+        n_segments_ann = n_segments[ann]
+        if verbose:
+            print('{} : in_rad={}, n_segm={}'.format(ann+1, inner_radius,
+                                                     n_segments_ann))
+
+        
+        for i in range(n_rots):
+            theta_init = i * azimuth_overlap
+            indices = get_annulus_segments(cube[0], inner_radius,
+                                           annulus_width, n_segments_ann,
+                                           theta_init)
+
+            patches = pool_map(nproc, _decompose_patch, indices,
+                               iterable(range(n_segments_ann)),cube_init, n_segments_ann,
+                               rank, low_rank_ref, low_rank_mode, thresh,
+                               thresh_mode, max_iter, auto_rank_mode, cevr,
+                               residuals_tol, random_seed, debug, full_output)
+
+            for j in range(n_segments_ann):
+                yy = indices[j][0]
+                xx = indices[j][1]
+
+                if full_output:
+                    matrix_l[i, :, yy, xx] = patches[j][0]
+                    matrix_s[i, :, yy, xx] = patches[j][1]
+                    matrix_g[i, :, yy, xx] = patches[j][2]
+                else:
+                    matrix_s[i, :, yy, xx] = patches[j]
+
+    if full_output:
+        list_s_array_der = [cube_derotate(matrix_s[k], angle_list, imlib=imlib,
+                                          interpolation=interpolation)
+                            for k in range(n_rots)]
+        list_frame_s = [cube_collapse(list_s_array_der[k], mode=collapse)
+                        for k in range(n_rots)]
+        frame_s = cube_collapse(np.array(list_frame_s), mode=collapse)
+
+        list_l_array_der = [cube_derotate(matrix_l[k], angle_list, imlib=imlib,
+                                          interpolation=interpolation)
+                            for k in range(n_rots)]
+        list_frame_l = [cube_collapse(list_l_array_der[k], mode=collapse)
+                        for k in range(n_rots)]
+        frame_l = cube_collapse(np.array(list_frame_l), mode=collapse)
+
+        list_g_array_der = [cube_derotate(matrix_g[k], angle_list, imlib=imlib,
+                                          interpolation=interpolation)
+                            for k in range(n_rots)]
+        list_frame_g = [cube_collapse(list_g_array_der[k], mode=collapse)
+                        for k in range(n_rots)]
+        frame_g = cube_collapse(np.array(list_frame_g), mode=collapse)
+
+    else:
+        list_s_array_der = [cube_derotate(matrix_s[k], angle_list, imlib=imlib,
+                                          interpolation=interpolation)
+                            for k in range(n_rots)]
+        list_frame_s = [cube_collapse(list_s_array_der[k], mode=collapse)
+                        for k in range(n_rots)]
+
+        frame_s = cube_collapse(np.array(list_frame_s), mode=collapse)
+
+
+    if full_output:
+        return(list_l_array_der, list_s_array_der, list_g_array_der,
+               frame_l, frame_s, frame_g)
+    else:
+        return frame_s
     
 
-def _decompose_patch(indices, i_patch,cube_init, n_segments_ann, rank, low_rank_ref,
+def _decompose_patch(indices, i_patch, cube_init, n_segments_ann, rank, low_rank_ref,
                      low_rank_mode, thresh, thresh_mode, max_iter,
                      auto_rank_mode, cevr, residuals_tol, random_seed,
                      debug=False, full_output=False):
-    
-
-    """ Patch decomposition from the LLSG VIP function.
+    """ Patch decomposition.
     """
-    
     j = i_patch
     yy = indices[j][0]
     xx = indices[j][1]
@@ -1069,173 +1373,214 @@ def _decompose_patch(indices, i_patch,cube_init, n_segments_ann, rank, low_rank_
                          full_output=full_output)
     return patch
 
-_largenumber = 1E100
-_smallnumber = 1E-5
 
-class NMF:
-    """
-    Nonnegative Matrix Factorization - Build a set of nonnegative basis components given 
-    a dataset with Heteroscedastic uncertainties and missing data with a vectorized update rule.
-    Algorithm:
-      -- Iterative multiplicative update rule
-    Input: 
-      -- X: m x n matrix, the dataset
-    Optional Input/Output: 
-      -- n_components: desired size of the basis set, default 5
-      -- V: m x n matrix, the weight, (usually) the inverse variance
-      -- M: m x n binary matrix, the mask, False means missing/undesired data
-      -- H: n_components x n matrix, the H matrix, usually interpreted as the coefficients
-      -- W: m x n_components matrix, the W matrix, usually interpreted as the basis set
-    Comments:
-      -- Between W and H, which one is the basis set and which one is the coefficient 
-         depends on how you interpret the data, because you can simply transpose everything
-         as in X-WH versus X^T - (H^T)(W^T)
-      -- Everything needs to be non-negative
-    References:
-      -- Guangtun Ben Zhu, 2016
-         A Vectorized Algorithm for Nonnegative Matrix Factorization with 
-         Heteroskedastic Uncertainties and Missing Data
-         AJ/PASP, (to be submitted)
-      -- Blanton, M. and Roweis, S. 2007
-         K-corrections and Filter Transformations in the Ultraviolet, Optical, and Near-infrared
-         The Astronomical Journal, 133, 734
-      -- Lee, D. D., & Seung, H. S., 2001
-         Algorithms for non-negative matrix factorization
-         Advances in neural information processing systems, pp. 556-562
-    """
+def Hessian(x, f, step=0.05):
+    
+    def matrix_indices(n):
+        for i in range(n):
+            for j in range(i, n):
+                yield i, j
+    
+    n = len(x)
 
-    def __init__(self, X, W=None, H=None, V=None, M=None, n_components=5):
-        """
-        Initialization
-        
-        Required Input:
-          X -- the input data set
-        Optional Input/Output:
-          -- n_components: desired size of the basis set, default 5
-          -- V: m x n matrix, the weight, (usually) the inverse variance
-          -- M: m x n binary matrix, the mask, False means missing/undesired data
-          -- H: n_components x n matrix, the H matrix, usually interpreted as the coefficients
-          -- W: m x n_components matrix, the W matrix, usually interpreted as the basis set
-        """
+    h = np.empty(n)
+    h.fill(step)
 
-        # I'm making a copy for the safety of everything; should not be a bottleneck
-        self.X = np.copy(X) 
-        if (np.count_nonzero(self.X<0)>0):
-            print("There are negative values in X. Setting them to be zero...", flush=True)
-            self.X[self.X<0] = 0.
+    ee = np.diag(h)
 
-        self.n_components = n_components
-        self.maxiters = 100
-        self.tol = _smallnumber
-        np.random.seed(10)
-        if (W is None):
-            self.W = np.random.rand(self.X.shape[0], self.n_components)
-        else:
-            if (W.shape != (self.X.shape[0], self.n_components)):
-                raise ValueError("Initial W has wrong shape.")
-            self.W = np.copy(W)
-        if (np.count_nonzero(self.W<0)>0):
-            print("There are negative values in W. Setting them to be zero...", flush=True)
-            self.W[self.W<0] = 0.
+    f0 = f(x)
+    g = np.zeros(n)
+    #print(x,f0)
+    
+    new_opti =True
+    while new_opti ==True:
+        new_opti =False
+        for i in range(n):
+            g[i] = f(x+ee[i, :])
+            #print(x + ee[i, :],g[i])
+            if g[i]<f0:
+                f0=g[i]
+                x+= ee[i, :]
+                new_opti ==True 
+                break
 
-        if (H is None):
-            self.H = np.random.rand(self.n_components, self.X.shape[1])
-        else:
-            if (H.shape != (self.n_components, self.X.shape[1])):
-                raise ValueError("Initial H has wrong shape.")
-            self.H = np.copy(H)
-        if (np.count_nonzero(self.H<0)>0):
-            print("There are negative values in H. Setting them to be zero...", flush=True)
-            self.H[self.H<0] = 0.
-
-        if (V is None):
-            self.V = np.ones(self.X.shape)
-        else:
-            if (V.shape != self.X.shape):
-                raise ValueError("Initial V(Weight) has wrong shape.")
-            self.V = np.copy(V)
-        if (np.count_nonzero(self.V<0)>0):
-            print("There are negative values in V. Setting them to be zero...", flush=True)
-            self.V[self.V<0] = 0.
-
-        if (M is None):
-            self.M = np.ones(self.X.shape, dtype=np.bool)
-        else:
-            if (M.shape != self.X.shape):
-                raise ValueError("M(ask) has wrong shape.")
-            if (M.dtype != np.bool):
-                raise TypeError("M(ask) needs to be boolean.")
-            self.M = np.copy(M)
-
-        # Set masked elements to be zero
-        self.V[(self.V*self.M)<=0] = 0
-        self.V_size = np.count_nonzero(self.V)
-
-    @property
-    def cost(self):
-        """
-        Total cost of a given set s
-        """
-        diff = self.X - np.dot(self.W, self.H)
-        chi2 = np.einsum('ij,ij', self.V*diff, diff)/self.V_size
-        return chi2
-
-    def SolveNMF(self, W_only=False, H_only=False, maxiters=None, tol=None):
-        """
-        Construct the NMF basis
-        Keywords:
-            -- W_only: Only update W, assuming H is known
-            -- H_only: Only update H, assuming W is known
-               -- Only one of them can be set
-        Optional Input:
-            -- tol: convergence criterion, default 1E-5
-            -- maxiters: allowed maximum number of iterations, default 1000
-        Output: 
-            -- chi2: reduced final cost
-            -- time_used: time used in this run
-        """
-
-
-        if (maxiters is not None): 
-            self.maxiters = maxiters
-        if (tol is not None):
-            self.tol = tol
-
-        chi2 = self.cost
-        oldchi2 = _largenumber
-
-        if (W_only and H_only):
-            return (chi2, 0.)
-
-        V = np.copy(self.V)
-        VT = V.T
-
-        #XV = self.X*self.V
-        XV = np.multiply(V, self.X)
-        XVT = np.multiply(VT, self.X.T)
-
-        niter = 0
-
-        while (niter < self.maxiters) and ((oldchi2-chi2)/oldchi2 > self.tol):
-
-            # Update H
-            if (not W_only):
-                H_up = np.dot(XVT, self.W)
-                WHVT = np.multiply(VT, np.dot(self.W, self.H).T)
-                H_down = np.dot(WHVT, self.W)
-                self.H = self.H*H_up.T/H_down.T
-
-            # Update W
-            if (not H_only):
-                W_up = np.dot(XV, self.H.T)
-                WHV = np.multiply(V, np.dot(self.W, self.H))
-                W_down = np.dot(WHV, self.H.T)
-                self.W = self.W*W_up/W_down
-
-            # chi2
-            oldchi2 = chi2
-            chi2 = self.cost
-
-        return
+    hess = np.outer(h, h)
+    new_opti =True
+    while new_opti ==True:
+        new_opti =False
+        for i, j in matrix_indices(n):
+            f_esti=f(x + ee[i, :] + ee[j, :])
+            if f_esti>=f0:
+            
+                hess[i, j] = ( f_esti -
+                          g[i] - g[j] + f0)/hess[i, j]
+                hess[j, i] = hess[i, j]
+            else:
+                f0=f_esti
+                x+= ee[i, :] + ee[j, :]
+                new_opti =True
+                break
+            
+        return x,hess
     
 
+def bayesian_optimization(loss_function,bounds, param_type,args=None,n_random_esti=30, n_iters=20,random_search=True,multi_search=False,n_restarts=200,ncore=1):
+
+    """
+
+    Parameters
+    ----------
+    loss_function: function,
+            function to optimize
+    bounds: numpy ndarray 2d,
+            boundary conditions for the set of parameters 
+    param_type: list,
+            define if the parameters are float ('float') or integer ('int')
+    n_random_esti: int,
+            number of loss function estimations used to initialize the Gaussian Process
+    n_iters: int,
+            the number of iterations of the Bayesian optimization algorithm
+    random_search: bool,
+            define if a random search is used to define the next point to sample based on
+            the maximization of the expected improvement. If False, a L-BFGS-B minimisation
+            is perform to define the next point of the parameter space to sample
+    n_restarts: int,
+            Number of points of the parameter space for which the expected improvement
+            is computed if random_search=True and the number of tested starting points if
+            random_search=False.
+    n_core: int,
+            number of cores used to perform the loss function estimations during the Gaussian 
+            process initialization.
+    """
+    
+    def expected_improvement(x, gauss_proc, eval_loss, space_dim):
+    
+        x_p = x.reshape(-1, space_dim)
+    
+        mu, sigma = gauss_proc.predict(x_p, return_std=True)
+    
+        opti_loss = np.max(eval_loss)
+    
+        # In case sigma equals zero
+        with np.errstate(divide='ignore'):
+            Z = (mu - opti_loss) / sigma
+            expected_improvement = (mu - opti_loss) * norm.cdf(Z) + sigma * norm.pdf(Z)
+            expected_improvement[sigma == 0.0] == 0.0
+    
+        return -1* expected_improvement
+    
+    
+    
+    def sample_next_hyperparameter(acquisition_func, gaussian_process, evaluated_loss,
+                                   bounds=(0, 10),param_type='int', n_restarts=10):
+    
+        n_params = bounds.shape[0]
+        
+        params=[]
+          
+        for i in range(len(param_type)):
+            
+            if param_type[i]=='int':
+                params.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (n_restarts)))
+            else:
+                params.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (n_restarts)))
+    
+        ei_temp=[]
+        param_temp=[]
+        param_sel=[]
+        for starting_point in np.array(params).T:
+            
+            res = minimize(fun=acquisition_func,
+                           x0=starting_point.reshape(1, -1),
+                           bounds=bounds,
+                           method='L-BFGS-B',
+                           args=(gaussian_process, evaluated_loss, n_params))
+    
+            
+            ei_temp.append(-res.fun[0])
+            param_temp.append(res.x)
+            param_sel.append(res.x)
+            for j in range(len(param_sel[-1])):
+                param_sel[-1][j]=round(param_sel[-1][j],ndigits=np.where(np.log10(param_sel[-1][j])>0,3,int(abs(np.log10(param_sel[-1][j])))+3)) 
+       
+        param_sel,index_sel=np.unique(np.array(param_sel),return_index=True,axis=0)
+        param_temp=np.take(np.array(param_temp),index_sel,axis=0)
+        ei_temp=np.take(np.array(ei_temp),index_sel)
+     
+        return ei_temp,param_temp
+    
+    np.random.seed(10)
+    space_dim = bounds.shape[0]
+    
+    params_m=[]
+    
+    for i in range(len(param_type)):
+        if param_type[i]=='int':
+            params_m.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+        else:
+            params_m.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (n_random_esti)))
+            
+            
+    res_param = pool_map(ncore, loss_function, iterable(np.array(params_m).T),*args)
+    
+    x_ini=[]
+    y_ini=[]
+    
+    for res_temp in res_param:
+        x_ini.append(res_temp[0])
+        y_ini.append(res_temp[1])
+        
+    #kernel = gp.kernels.RationalQuadratic(length_scale=1.0, alpha=0.5, length_scale_bounds=(0.5,5),alpha_bounds=(0.6, 5))    
+    #kernel =gp.kernels.Matern(length_scale=1, nu=10, length_scale_bounds=(0.5,5))
+    kernel = gp.kernels.RBF(1.0, length_scale_bounds=(0.5,5))
+    
+    model = gp.GaussianProcessRegressor( kernel,
+                                       alpha=5e-6,                               
+                                    n_restarts_optimizer=0,
+                                    normalize_y=False)
+
+
+    for n in range(n_iters):
+    
+        model.fit(np.array(x_ini),np.array(y_ini))
+    
+        if random_search:
+            x_sel=[]
+            for i in range(len(param_type)):
+                if param_type[i]=='int':
+                    x_sel.append(np.random.random_integers(bounds[i, 0], bounds[i, 1], (n_restarts)))
+                else:
+                    x_sel.append(np.random.uniform(bounds[i, 0], bounds[i, 1], (n_restarts)))
+                    
+            x_sel=np.array(x_sel).T
+            ei = -1 * expected_improvement(x_sel, model, y_ini, space_dim=space_dim) 
+            
+        else:         
+            ei,x_sel = sample_next_hyperparameter(expected_improvement, model, y_ini, bounds=bounds,param_type=param_type, n_restarts=n_restarts)
+        
+    
+        if multi_search:
+            ind = np.argpartition(ei, -multi_search)[-multi_search:]
+            params_m = np.take(x_sel,ind,axis=0)
+        else:               
+            params_m = [x_sel[np.argmax(ei),:]]
+            
+        
+        # Duplicates break the GP
+        for j in range(params_m.shape[0]):
+             
+            if any((np.abs(params_m[j] - x_ini)/x_ini).sum(axis=1) < 1e-3):
+                          
+                for i in range(len(param_type)):                    
+                    if param_type[i]=='int':
+                        params_m[j][i]=np.random.random_integers(bounds[i, 0], bounds[i, 1], 1)[0]
+                    else:
+                        params_m[j][i]=np.random.uniform(bounds[i, 0], bounds[i, 1], 1)[0]
+
+        res_param = pool_map(ncore, loss_function, iterable(params_m),*args)
+                
+        for res_temp in res_param:
+            x_ini.append(res_temp[0])
+            y_ini.append(res_temp[1])
+        
+    return x_ini[np.argmax(y_ini)],np.max(y_ini) 
