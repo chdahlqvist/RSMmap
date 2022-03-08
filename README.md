@@ -43,7 +43,7 @@ A jupyter notebook tutorial as well as a dataset of 51 Eridani B is provided in 
 
 The package may be installed via pip install using the command:
 
->pip install pip install https://github.com/chdahlqvist/RSMmap/releases/download/0.3.0/PyRSM.tar.gz
+>pip install https://github.com/chdahlqvist/RSMmap/releases/download/0.3.0/PyRSM.tar.gz
 
 A jupyter notebook tutorial as well as a test dataset of 51 Eridani B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example).
 
