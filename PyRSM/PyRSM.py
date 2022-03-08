@@ -67,7 +67,7 @@ from scipy.optimize import minimize
 import math
 import warnings
 warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning) 
-from utils import (llsg_adisdi,loci_adisdi,do_pca_patch,_decompose_patch,
+from .utils import (llsg_adisdi,loci_adisdi,do_pca_patch,_decompose_patch,
 annular_pca_adisdi,NMF_patch,nmf_adisdi,LOCI_FM,KLIP_patch,perturb,KLIP,
 get_time_series,poly_fit,interpolation,remove_outliers,check_delta_sep ,rot_scale,
 bayesian_optimization,Hessian)
@@ -1437,6 +1437,7 @@ class PyRSM:
             prob_fin=np.zeros((2,obs.shape[1]))
             prob_pre_fw=0
             prob_pre_bw=0
+            lik=0
             
             for i in range(obs.shape[1]):
                 if obs[:,i].sum()!=0:
@@ -1463,6 +1464,9 @@ class PyRSM:
                         
                     prob_pre_bw=prob_bw[:,j]
     
+            scalefact_fw_tot=(scalefact_fw).sum()                
+            scalefact_bw_tot=(scalefact_bw).sum()
+    
     
             for k in range(obs.shape[1]):
                 if (prob_fw[:,k]*prob_bw[:,k]).sum()==0:
@@ -1470,7 +1474,9 @@ class PyRSM:
                 else:
                     prob_fin[:,k]=(prob_fw[:,k]*prob_bw[:,k])/(prob_fw[:,k]*prob_bw[:,k]).sum()
     
-            return prob_fin
+            lik = scalefact_fw_tot+scalefact_bw_tot
+    
+            return prob_fin, lik
     
     
         def RSM_esti(obs,Trpr,prob_ini):
@@ -1478,19 +1484,25 @@ class PyRSM:
             #Original RSM approach involving a forward two-states Markov chain to compute the probabilities
     
             prob_fin=np.zeros((2,obs.shape[1]))
-            prob_pre=prob_ini
+            prob_pre=0
+            lik=0
     
             for i in range(obs.shape[1]):
                 if obs[:,i].sum()!=0:
-                    cf=obs[:,i]*np.dot(Trpr,prob_pre)
+                    if i==0:
+                        cf=obs[:,i]*np.dot(Trpr,prob_ini)
+                    else:
+                        cf=obs[:,i]*np.dot(Trpr,prob_pre)
         
-                    prob_fin[:,i]=cf/sum(cf)
+                    
+                    f=sum(cf)            
+                    lik+=np.log(f)
+                    prob_fin[:,i]=cf/f
                     prob_pre=prob_fin[:,i]
                 else:
                     prob_fin[:,i]=[1,0]
-                    prob_pre=prob_fin[:,i]
     
-            return prob_fin
+            return prob_fin, lik
     
         probmap = np.zeros((like_cube.shape[0],like_cube.shape[1],like_cube.shape[2]))
         ceny, cenx = frame_center(like_cube[0,:,:,0,0])
@@ -1515,13 +1527,16 @@ class PyRSM:
         cf=np.zeros((2,len(indicesy)*like_cube.shape[0],like_cube.shape[3]))
         totind=0
         for i in range(0,len(indicesy)):
+
+            poscenty=indicesy[i]
+            poscentx=indicesx[i]
                 
             for j in range(0,like_cube.shape[0]):        
 
                     for m in range(0,like_cube.shape[3]):
                         
-                        cf[0,totind,m]=like_cube[j,indicesy[i],indicesx[i],m,0]
-                        cf[1,totind,m]=like_cube[j,indicesy[i],indicesx[i],m,1]
+                        cf[0,totind,m]=like_cube[j,poscenty,poscentx,m,0]
+                        cf[1,totind,m]=like_cube[j,poscenty,poscentx,m,1]
                     totind+=1
                     
         #Computation of the probability cube via the regime switching framework
@@ -1530,12 +1545,13 @@ class PyRSM:
         lik_fin=[]
         for n in range(like_cube.shape[3]):
             if estimator=='Forward':
-                prob_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
+                prob_fin_temp,lik_fin_temp=RSM_esti(cf[:,:,n],Trpr,prob_ini)
             elif estimator=='Forward-Backward':
-                prob_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
+                prob_fin_temp,lik_fin_temp=forback(cf[:,:,n],Trpr,prob_ini)
+
 
             prob_fin.append(prob_fin_temp)
-
+            lik_fin.append(lik_fin_temp)
         
         cub_id1=0   
         for i in range(0,len(indicesy)):
