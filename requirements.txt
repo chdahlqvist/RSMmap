@@ -2,3 +2,4 @@ vip_hci >=1.0.3
 lmfit >= 1.0.3
 pyswarms >=1.3.0
 scikit-learn>=1.0.2
+scipy >=1.4
