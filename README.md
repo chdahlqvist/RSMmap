@@ -37,7 +37,7 @@ characterization of a detected astrophysical signals. The *contrast_curve* metho
  distribution but requires a longer computation time. The *target_charact* method allows the 
  estimation of the photometry and astrometry of a detected signal (see Dahlqvist et al. 2022 for more details)
 
-A jupyter notebook tutorial as well as a dataset of Beta Pictoris B is provided in the folder example to test the PyRSM class. A list of parameters for the PyRSM class and for the main functions are given below:
+A jupyter notebook tutorial as well as a dataset of 51 Eridani B is provided in the folder example to test the PyRSM class. A list of parameters for the PyRSM class and for the main functions are given below:
 
 ## Setup and tutorial
 
@@ -45,7 +45,7 @@ The package may be installed via pip install using the command:
 
 >pip install https://github.com/chdahlqvist/RSMmap/archive/0.3.0.tar.gz
 
-A jupyter notebook tutorial as well as a test dataset of Beta Pictoris B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example).
+A jupyter notebook tutorial as well as a test dataset of 51 Eridani B is provided [here](https://github.com/chdahlqvist/RSMmap/tree/master/Example).
 
 
 ##PyRSM class
