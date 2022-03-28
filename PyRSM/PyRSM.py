@@ -437,7 +437,7 @@ class PyRSM:
     def save_parameters(self,folder,name):
         
         with open(folder+name+'.pickle', "wb") as save:
-            pickle.dump([self.model, self.delta_rot,self.nsegments,self.ncomp,self.rank,self.tolerance,self.asize,self.psf_fm,self.intensity,self.distri,self.distrifit,self.var,self.crop,self.crop_range,self.opti_sel,self.threshold,self.opti_mode,self.flux_opti,self.opti_theta,self.interval],save)
+            pickle.dump([self.model, self.delta_rot,self.nsegments,self.ncomp,self.rank,self.tolerance,self.asize,self.intensity,self.distri,self.distrifit,self.var,self.crop,self.crop_range,self.opti_sel,self.threshold,self.opti_mode,self.flux_opti,self.opti_theta,self.interval],save)
         
         
     def load_parameters(self,name):
@@ -455,19 +455,18 @@ class PyRSM:
         self.rank = saved_param[4]
         self.tolerance = saved_param[5]
         self.asize= saved_param[6]
-        self.psf_fm= saved_param[7]
-        self.intensity = saved_param[8]
-        self.distri = saved_param[9] 
-        self.distrifit= saved_param[10]        
-        self.var = saved_param[11]
-        self.crop= saved_param[12]
-        self.crop_range= saved_param[13]
-        self.opti_sel=saved_param[14]
-        self.threshold=saved_param[15]
-        self.opti_mode=saved_param[16]
-        self.flux_opti=saved_param[17]
-        self.opti_theta=saved_param[18]
-        self.interval=saved_param[19]
+        self.intensity = saved_param[7]
+        self.distri = saved_param[8] 
+        self.distrifit= saved_param[9]        
+        self.var = saved_param[10]
+        self.crop= saved_param[11]
+        self.crop_range= saved_param[12]
+        self.opti_sel=saved_param[13]
+        self.threshold=saved_param[14]
+        self.opti_mode=saved_param[15]
+        self.flux_opti=saved_param[16]
+        self.opti_theta=saved_param[17]
+        self.interval=saved_param[18]
         
     def likelihood(self,ann_center,cuben,modn,mcube,cube_fc=None,verbose=True):
          
@@ -476,6 +475,7 @@ class PyRSM:
         
         if mcube.ndim==4:
             z,n,y,x=mcube.shape
+            
         else:
             n,y,x=mcube.shape
             z=1
@@ -491,7 +491,9 @@ class PyRSM:
             np.random.seed(10) 
             
             phi=np.zeros(2)
-            n,y,x=mcube.shape 
+            if self.cube[cuben].ndim==4:
+                n_t=self.cube[cuben].shape[1]  
+
             ceny, cenx = frame_center(mcube[0])
             indicesy,indicesx=get_time_series(mcube,ann_center)
 
@@ -508,7 +510,10 @@ class PyRSM:
                 psf_fm_out=np.zeros((len(indicesx),mcube.shape[0],int(2*round(self.fwhm)+1),int(2*round(self.fwhm)+1)))
 
             if (self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1))!=self.psf[cuben].shape[-1]:
-                psf_temp=frame_crop(self.psf[cuben],int(self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1)),cenxy=[int(self.psf[cuben].shape[1]/2),int(self.psf[cuben].shape[1]/2)],verbose=False)
+                if len(self.psf[cuben].shape)==2:
+                    psf_temp=frame_crop(self.psf[cuben],int(self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1)),cenxy=[int(self.psf[cuben].shape[1]/2),int(self.psf[cuben].shape[1]/2)],verbose=False)
+                else:
+                    psf_temp=cube_crop_frames(self.psf[cuben],int(self.crop[modn][ann_center,cuben]+2*(self.crop_range[modn]-1)),xy=(int(self.psf[cuben].shape[1]/2),int(self.psf[cuben].shape[1]/2)),verbose=False)
             else:
                 psf_temp=self.psf[cuben]
 
@@ -600,7 +605,7 @@ class PyRSM:
                         num=[]
                         denom=[]
                     
-                        for j in range(n): 
+                        for j in range(n*z): 
                             
                             if self.var[modn][ann_center,cuben]=='FR':
                                 svar=var_f[j,v]
@@ -616,11 +621,14 @@ class PyRSM:
                             else:
                                 psfm_temp2=psf_temp
                         
-                            if psfm_temp2.shape[0]==cropf:
+                            if psfm_temp2.shape[1]==cropf:
                                 psfm=psfm_temp2
                             else:
-                                psfm=frame_crop(psfm_temp2,cropf,cenxy=[int(psfm_temp2.shape[0]/2),int(psfm_temp2.shape[0]/2)],verbose=False)
-  
+                                if len(psfm_temp2.shape)==2:
+                                    psfm=frame_crop(psfm_temp2,cropf,cenxy=[int(psfm_temp2.shape[0]/2),int(psfm_temp2.shape[0]/2)],verbose=False)
+                                else:
+                                    psfm=frame_crop(psfm_temp2[int(j//n_t)],cropf,cenxy=[int(psfm_temp2.shape[0]/2),int(psfm_temp2.shape[0]/2)],verbose=False)
+                                
                             num.append(np.multiply(frame_crop(mcube[j],cropf,cenxy=[poscentx,poscenty],verbose=False),psfm).sum()/svar)
                             denom.append(np.multiply(psfm,psfm).sum()/svar)
                         
@@ -630,9 +638,9 @@ class PyRSM:
                 # Reverse the temporal direction when moving from one patch to the next one to respect the temporal proximity of the pixels and limit potential non-linearity
                         
                 if i%2==1:
-                    range_sel=range(n)
+                    range_sel=range(n*z)
                 else:
-                    range_sel=range(n-1,-1,-1)
+                    range_sel=range(n*z-1,-1,-1)
                     
                 # Likelihood computation for the patch i
                 
@@ -648,11 +656,14 @@ class PyRSM:
                         for v in range(0,self.crop_range[modn]):
                             
                             cropf=int(self.crop[modn][ann_center,cuben]+2*v)
-                            if psfm_temp2.shape[0]==cropf:
+                            if psfm_temp2.shape[1]==cropf:
                                 psfm=psfm_temp2
                             else:
-                                psfm=frame_crop(psfm_temp2,cropf,cenxy=[int(psfm_temp2.shape[1]/2),int(psfm_temp2.shape[1]/2)],verbose=False)
-           
+                                if len(psfm_temp2.shape)==2:
+                                    psfm=frame_crop(psfm_temp2,cropf,cenxy=[int(psfm_temp2.shape[0]/2),int(psfm_temp2.shape[0]/2)],verbose=False)
+                                else:
+                                    psfm=frame_crop(psfm_temp2[int(j//n_t)],cropf,cenxy=[int(psfm_temp2.shape[0]/2),int(psfm_temp2.shape[0]/2)],verbose=False)
+                                
 
                             if self.var[modn][ann_center,cuben]=='ST':
                                 svar=var[v]
@@ -705,7 +716,7 @@ class PyRSM:
 
                                 #Likelihood estimation
                                 
-                                ff=frame_crop(mcube[cubind],cropf,cenxy=[poscentx,poscenty],verbose=False)-phi[l]*psfm-alpha
+                                ff=frame_crop(mcube[j],cropf,cenxy=[poscentx,poscenty],verbose=False)-phi[l]*psfm-alpha
                                 if sel_distri==0:
                                         cftemp=(1/np.sqrt(2 * np.pi*svar))*np.exp(-0.5*np.multiply(ff,ff)/svar)
                                 elif sel_distri==1:
@@ -717,7 +728,7 @@ class PyRSM:
                                         cftemp=maxhist*np.exp(-np.where(abs_x < svar, mv * abs_x**2,2*svar*mv*abs_x -mv*svar**2))
 
                                 probcube[int(cubind),int(indicesy[i]),int(indicesx[i]),int(m),l,v]=cftemp.sum()
-
+                
                     cubind+=1
             
             if self.model[modn]=='FM KLIP' or self.model[modn]=='FM LOCI':
@@ -962,10 +973,14 @@ class PyRSM:
            
 
             mixval_temp=None
-            try:
-                hist, bin_edge =np.histogram(arr,bins='auto',density=True)
-            except (IndexError, TypeError, ValueError):
-                hist, bin_edge =np.histogram(arr,bins=len(arr)/15,density=True)
+
+            if self.model[modn]=='LLSG':
+                hist, bin_edge =np.histogram(arr,bins=np.max([20,int(len(arr)/20)]),density=True)
+            else:
+                try:
+                    hist, bin_edge =np.histogram(arr,bins='auto',density=True)
+                except (IndexError, TypeError, ValueError,MemoryError):
+                    hist, bin_edge =np.histogram(arr,bins=np.max([20,int(len(arr)/20)]),density=True)
                 
             bin_mid=(bin_edge[0:(len(bin_edge)-1)]+bin_edge[1:len(bin_edge)])/2
             
@@ -1026,9 +1041,9 @@ class PyRSM:
                elif self.distri[modn]=='A':
                    
                    res=[]
-                   res.append(te_f_gl(gaus,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),0),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,0))
-                   res.append(te_f_gl(lap,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),0),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,1))
-                   res.append(te_f_mh(mix,fixmix,bin_mid,hist,[mean_e,var_e,0.5],[(mean_e-np.sqrt(var_e),0,0),(mean_e+np.sqrt(var_e),4*var_e,1)],[0.5],[(0),(1)],mean_e,var_e,2))                   
+                   res.append(te_f_gl(gaus,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),1e-10),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,0))
+                   res.append(te_f_gl(lap,bin_mid,hist,[mean_e,var_e],[(mean_e-np.sqrt(var_e),1e-10),(mean_e+np.sqrt(var_e),2*var_e)],mean_e,var_e,1))
+                   res.append(te_f_mh(mix,fixmix,bin_mid,hist,[mean_e,var_e,0.5],[(mean_e-np.sqrt(var_e),1e-10,0),(mean_e+np.sqrt(var_e),4*var_e,1)],[0.5],[(0),(1)],mean_e,var_e,2))                   
                    res.append(te_f_mh(huber_loss,hl,bin_mid,hist/max(hist),[mean_e,np.mean(abs(bin_mid)),0.01/max(abs(bin_mid))],[(mean_e-np.sqrt(var_e),min(abs(bin_mid)),0.0001/max(abs(bin_mid))),(mean_e+np.sqrt(var_e),max(abs(bin_mid)),2)],[0.01/max(abs(bin_mid))],[(0.0001),(2)],mean_e,1,3))
                    fiterr=list([res[0][3],res[1][3],res[2][3],res[3][3]*max(hist)])
                    distrim_temp=fiterr.index(min(fiterr))
@@ -1038,6 +1053,8 @@ class PyRSM:
                    mixval_temp=res[distrim_temp][1]
                    var_temp=res[distrim_temp][2]
                    fiterr_temp=res[distrim_temp][3]
+                
+                
             
             return mean_temp,var_temp,fiterr_temp,mixval_temp,distrim_temp,max(hist)
 
@@ -1090,11 +1107,21 @@ class PyRSM:
                 for a in range((n*z)):
            
                     arr = np.ndarray.flatten(mcube[a,poscenty,poscentx])
-                    
-                    mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[a,poscenty,poscentx]),np.mean(mcube[a,poscenty,poscentx]))
-
+            
                     var_f[a,v]=np.var(mcube[a,poscenty,poscentx])
+                
+                    if var_f[a,v]==0:
+                        mean[a,v]=mean[a-1,v]
+                        var[a,v]=var[a-1,v]
+                        fiterr[a,v]=fiterr[a-1,v]
+                        mixval[a,v]=mixval[a-1,v]
+                        distrim[a,v]=distrim[a-1,v]
+                        max_hist[a,v]=max_hist[a-1,v]
+                        var_f[a,v]=var_f[a-1,v]
+                    else:    
                     
+                        mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[a,poscenty,poscentx]),np.mean(mcube[a,poscenty,poscentx]))
+
         elif self.var[modn][ann_center,cuben]=='SM':
             
             indicesy,indicesx=get_time_series(mcube,ann_center)
@@ -1151,10 +1178,20 @@ class PyRSM:
 
         
                     arr = np.ndarray.flatten(mcube[:,positiony,positionx])
-
-                    mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[:,positiony,positionx]),np.mean(mcube[:,positiony,positionx]))
-
                     var_f[a,v]=np.var(mcube[:,positiony,positionx])
+                
+                    if var_f[a,v]==0:
+                        mean[a,v]=mean[a-1,v]
+                        var[a,v]=var[a-1,v]
+                        fiterr[a,v]=fiterr[a-1,v]
+                        mixval[a,v]=mixval[a-1,v]
+                        distrim[a,v]=distrim[a-1,v]
+                        max_hist[a,v]=max_hist[a-1,v]
+                        var_f[a,v]=var_f[a-1,v]
+                    else:    
+                        mean[a,v],var[a,v],fiterr[a,v],mixval[a,v],distrim[a,v],max_hist[a,v]=vm_esti(modn,arr,np.var(mcube[:,positiony,positionx]),np.mean(mcube[:,positiony,positionx]))
+
+
                     
         elif self.var[modn][ann_center,cuben]=='FM' :
             
@@ -1173,7 +1210,7 @@ class PyRSM:
                 cropf=int(self.crop[modn][ann_center,cuben]+2*v)
                 indices = get_annulus_segments(mcube[0], ann_center-int(cropf/2),cropf,1)
             
-                for a in range(0,len(indicesy)):
+                for a in range(len(indicesy)):
          
                     indc=disk((indicesy[a], indicesx[a]),3)
                     positionx=[]
@@ -1187,10 +1224,20 @@ class PyRSM:
                     for b in range((n*z)):
            
                         arr = np.ndarray.flatten(mcube[b,positiony,positionx])
-                    
-                        mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube[b,positiony,positionx])),np.mean(np.asarray(mcube[b,positiony,positionx])))
             
                         var_f[a,b,v]=np.var(mcube[b,positiony,positionx])
+                        if var_f[a,b,v]==0:
+                            mean[a,b,v]=mean[a,b-1,v]
+                            var[a,b,v]=var[a,b-1,v]
+                            fiterr[a,b,v]=fiterr[a,b-1,v]
+                            mixval[a,b,v]=mixval[a,b-1,v]
+                            distrim[a,b,v]=distrim[a,b-1,v]
+                            max_hist[a,b,v]=max_hist[a,b-1,v]
+                            var_f[a,b,v]=var_f[a,b-1,v]
+                        else:    
+                            mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube[b,positiony,positionx])),np.mean(np.asarray(mcube[b,positiony,positionx])))
+            
+                        
                             
         elif self.var[modn][ann_center,cuben]=='TE' :
         
@@ -1214,6 +1261,8 @@ class PyRSM:
             for v in range(0,self.crop_range[modn]):
                 cropf=int(self.crop[modn][ann_center,cuben]+2*v)
                 for a in range(0,len(indicesy)):
+                    
+                    
          
                     radist=np.sqrt((indicesx[a]-int(x/2))**2+(indicesy[a]-int(y/2))**2)
            
@@ -1241,10 +1290,19 @@ class PyRSM:
            
            
                         arr = np.ndarray.flatten(mcube_sel)
-
-                        mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube_sel)),np.mean(np.asarray(mcube_sel)))
-
+                
                         var_f[a,b,v]=np.var(np.asarray(mcube_sel))
+                        if var_f[a,b,v]==0:
+                            mean[a,b,v]=mean[a,b-1,v]
+                            var[a,b,v]=var[a,b-1,v]
+                            fiterr[a,b,v]=fiterr[a,b-1,v]
+                            mixval[a,b,v]=mixval[a,b-1,v]
+                            distrim[a,b,v]=distrim[a,b-1,v]
+                            max_hist[a,b,v]=max_hist[a,b-1,v]
+                            var_f[a,b,v]=var_f[a,b-1,v]
+                        else: 
+
+                            mean[a,b,v],var[a,b,v],fiterr[a,b,v],mixval[a,b,v],distrim[a,b,v],max_hist[a,b,v]=vm_esti(modn,arr,np.var(np.asarray(mcube_sel)),np.mean(np.asarray(mcube_sel)))
          
 
         #Estimation of the cube of likelihoods
