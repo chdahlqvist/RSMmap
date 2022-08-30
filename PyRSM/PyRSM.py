@@ -49,10 +49,10 @@ from skimage.draw import disk
 import vip_hci as vip
 from vip_hci.var import get_annulus_segments,frame_center,prepare_matrix
 from vip_hci.preproc import frame_crop,cube_derotate,cube_crop_frames,cube_collapse
-from vip_hci.metrics import cube_inject_companions, frame_inject_companion, normalize_psf
+from vip_hci.fm import cube_inject_companions, frame_inject_companion, normalize_psf
 from hciplot import plot_frames 
-from vip_hci.conf.utils_conf import pool_map, iterable
-from multiprocessing import Pool, RawArray
+from vip_hci.config.utils_conf import pool_map, iterable
+from multiprocessing import Pool
 import photutils
 from scipy import stats
 import pickle
@@ -80,6 +80,9 @@ def init_worker(X, X_shape):
     var_dict['X'] = X
     var_dict['X_shape'] = X_shape
     
+def shared_array(name: str, shape=None):
+    mp_array = globals()[name]
+    return np.frombuffer(mp_array.get_obj(), dtype=np.dtype(mp_array.get_obj()._type_)).reshape(shape)
 
             
 class PyRSM:
@@ -232,7 +235,7 @@ class PyRSM:
         """
         if cube.shape[-1]%2==0:
             raise ValueError("Images should have an odd size")
-            
+
         self.psf.append(psf)         
         self.cube.append(cube)
         self.pa.append(pa)
@@ -437,7 +440,7 @@ class PyRSM:
     def save_parameters(self,folder,name):
         
         with open(folder+name+'.pickle', "wb") as save:
-            pickle.dump([self.model, self.delta_rot,self.nsegments,self.ncomp,self.rank,self.tolerance,self.asize,self.intensity,self.distri,self.distrifit,self.var,self.crop,self.crop_range,self.opti_sel,self.threshold,self.opti_mode,self.flux_opti,self.opti_theta,self.interval],save)
+            pickle.dump([self.model, self.delta_rot,self.nsegments,self.ncomp,self.rank,self.tolerance,self.asize,self.psf_fm,self.intensity,self.distri,self.distrifit,self.var,self.crop,self.crop_range,self.opti_sel,self.threshold,self.opti_mode,self.flux_opti,self.opti_theta,self.interval],save)
         
         
     def load_parameters(self,name):
@@ -455,23 +458,24 @@ class PyRSM:
         self.rank = saved_param[4]
         self.tolerance = saved_param[5]
         self.asize= saved_param[6]
-        self.intensity = saved_param[7]
-        self.distri = saved_param[8] 
-        self.distrifit= saved_param[9]        
-        self.var = saved_param[10]
-        self.crop= saved_param[11]
-        self.crop_range= saved_param[12]
-        self.opti_sel=saved_param[13]
-        self.threshold=saved_param[14]
-        self.opti_mode=saved_param[15]
-        self.flux_opti=saved_param[16]
-        self.opti_theta=saved_param[17]
-        self.interval=saved_param[18]
+        self.psf_fm= saved_param[7]
+        self.intensity = saved_param[8]
+        self.distri = saved_param[9] 
+        self.distrifit= saved_param[10]        
+        self.var = saved_param[11]
+        self.crop= saved_param[12]
+        self.crop_range= saved_param[13]
+        self.opti_sel=saved_param[14]
+        self.threshold=saved_param[15]
+        self.opti_mode=saved_param[16]
+        self.flux_opti=saved_param[17]
+        self.opti_theta=saved_param[18]
+        self.interval=saved_param[19]
         
     def likelihood(self,ann_center,cuben,modn,mcube,cube_fc=None,verbose=True):
          
         if type(mcube) is not np.ndarray:
-            mcube = np.frombuffer(var_dict['X']).reshape(var_dict['X_shape'])
+            mcube = shared_array('resi_cube', shape=mcube)
         
         if mcube.ndim==4:
             z,n,y,x=mcube.shape
@@ -533,7 +537,7 @@ class PyRSM:
 
                             
                     if psf_formod==False:
-                            model_matrix=cube_inject_companions(np.zeros_like(mcube), self.psf[cuben], self.pa[cuben], flevel=1, plsc=0.1,rad_dists=an_dist, theta=theta, n_branches=1,verbose=False)
+                            model_matrix=cube_inject_companions(np.zeros_like(mcube), self.psf[cuben], self.pa[cuben], 1,an_dist, plsc=0.1, theta=theta, n_branches=1,verbose=False)
 
                             pa_threshold = np.rad2deg(2 * np.arctan(self.delta_rot[modn][ann_center,cuben] * self.fwhm / (2 * ann_center)))
                             mid_range = np.abs(np.amax(self.pa[cuben]) - np.amin(self.pa[cuben])) / 2
@@ -568,8 +572,8 @@ class PyRSM:
                         
                     if psf_formod==False:
                         
-                            model_matrix=cube_inject_companions(np.zeros_like(mcube), self.psf[cuben], self.pa[cuben], flevel=1, plsc=0.1, 
-                                 rad_dists=an_dist, theta=theta, n_branches=1,verbose=False)
+                            model_matrix=cube_inject_companions(np.zeros_like(mcube), self.psf[cuben], self.pa[cuben], 1,an_dist, plsc=0.1, 
+                                 theta=theta, n_branches=1,verbose=False)
                     
                             indices = get_annulus_segments(self.cube[cuben][0], ann_center-int(self.asize[modn]/2),int(self.asize[modn]),1)
                     
@@ -671,7 +675,7 @@ class PyRSM:
                                 mv=mixval[v]
                                 sel_distri=distrim[v]
                                 maxhist=max_hist[v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[v])
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var[v])
             
                             elif self.var[modn][ann_center,cuben]=='FR':
                                 svar=var[j,v]
@@ -679,7 +683,7 @@ class PyRSM:
                                 mv=mixval[j,v]
                                 sel_distri=distrim[j,v]
                                 maxhist=max_hist[j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[j,v])
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var[j,v])
             
                             elif self.var[modn][ann_center,cuben]=='SM':
                                 svar=var[i,v]
@@ -687,7 +691,7 @@ class PyRSM:
                                 mv=mixval[i,v]
                                 sel_distri=distrim[i,v] 
                                 maxhist=max_hist[i,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,v])
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var[i,v])
             
                             elif self.var[modn][ann_center,cuben]=='FM' :
                                 svar=var[i,j,v]
@@ -695,7 +699,7 @@ class PyRSM:
                                 mv=mixval[i,j,v]
                                 sel_distri=distrim[i,j,v] 
                                 maxhist=max_hist[i,j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,j,v])
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var[i,j,v])
                                     
                             elif self.var[modn][ann_center,cuben]=='TE':
                                 svar=var[i,j,v]
@@ -703,7 +707,7 @@ class PyRSM:
                                 mv=mixval[i,j,v]
                                 sel_distri=distrim[i,j,v]  
                                 maxhist=max_hist[i,j,v]
-                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var_f[i,j,v])
+                                phi[1]=self.interval[modn][ann_center,cuben][m]*np.sqrt(var[i,j,v])
                                 
                             if self.intensity[modn][ann_center,cuben]=='Pixel':
                                 phi[1]=np.where(flux_esti[v]<=0,0,flux_esti[v]) 
@@ -974,13 +978,12 @@ class PyRSM:
 
             mixval_temp=None
 
-            if self.model[modn]=='LLSG':
+            try:
+                hist, bin_edge =np.histogram(arr,bins='auto',density=True)
+            except (IndexError, TypeError, ValueError,MemoryError):
                 hist, bin_edge =np.histogram(arr,bins=np.max([20,int(len(arr)/20)]),density=True)
-            else:
-                try:
-                    hist, bin_edge =np.histogram(arr,bins='auto',density=True)
-                except (IndexError, TypeError, ValueError,MemoryError):
-                    hist, bin_edge =np.histogram(arr,bins=np.max([20,int(len(arr)/20)]),density=True)
+            if len(hist)>100:
+                hist, bin_edge =np.histogram(arr,bins=np.max([100,int(len(arr)/100)]),density=True) 
                 
             bin_mid=(bin_edge[0:(len(bin_edge)-1)]+bin_edge[1:len(bin_edge)])/2
             
@@ -1344,11 +1347,20 @@ class PyRSM:
             global probcube
             probcube = probi
             
-         
-        for i in range(len(self.model)):
             
-            for j in range(len(self.cube)):
-                
+        for j in range(len(self.cube)):
+            
+            if self.ncore!=1:
+                if self.cube[j].ndim==4:
+                    residuals_cube_=np.zeros((self.cube[j].shape[0]*self.cube[j].shape[1],self.cube[j].shape[-1],self.cube[j].shape[-1]))
+                else:
+                    residuals_cube_=np.zeros((self.cube[j].shape[0],self.cube[j].shape[-1],self.cube[j].shape[-1]))
+                resi_cube = mp.Array(typecode_or_type='f', size_or_initializer=int(np.prod(residuals_cube_.shape)))
+                globals()['resi_cube'] = resi_cube
+                ini_resi_cube = shared_array('resi_cube', shape=residuals_cube_.shape) 
+            
+            for i in range(len(self.model)):
+                        
                 #Computation of the cube of residuals
                 if sel_cube is None or [j,i] in sel_cube:
 
@@ -1414,7 +1426,6 @@ class PyRSM:
                         max_rad=self.maxradius+1
                     like_temp=np.zeros(((residuals_cube_.shape[0]+1),residuals_cube_.shape[1],residuals_cube_.shape[2],len(self.interval[i][0,j]),2,self.crop_range[i]))    
 
-
                     if self.ncore==1:
             
                         for e in range(self.minradius,max_rad):
@@ -1428,19 +1439,15 @@ class PyRSM:
                                 like_temp[:,indicesy,indicesx,:,:,:]=res[1] 
                     else:
                         
-                        X_shape=residuals_cube_.shape
-                        X = RawArray('d', int(np.prod(X_shape)))
-                        X_np = np.frombuffer(X).reshape(X_shape)
-                        np.copyto(X_np, residuals_cube_)
-                         
+                        ini_resi_cube[:] = residuals_cube_
                         #Sometimes the parallel computation get stuck, to avoid that we impose a maximum computation
-                        #time of 0.05 x number of frame x number of pixels in the last annulus x 2 x pi (0.05 second
+                        #time of 0.005 x number of frame x number of pixels iin the last annulus x 2 x pi (0.005 second
                         #per treated pixel)
-                        time_out=0.05*residuals_cube_.shape[0]*2*max_rad**np.pi
+                        time_out=0.03*residuals_cube_.shape[0]*2*max_rad**np.pi
                         results=[]    
-                        pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
+                        pool=Pool(processes=self.ncore)           
                         for e in range(self.minradius,max_rad):
-                            results.append(pool.apply_async(self.likelihood,args=(e,j,i,0,None,verbose)))
+                            results.append(pool.apply_async(self.likelihood,args=(e,j,i,residuals_cube_.shape,None,verbose)))
                         #[result.wait(timeout=time_out) for result in results]
                         
                         it=self.minradius
@@ -1453,6 +1460,7 @@ class PyRSM:
                                     #self.psf_fm[j][i][res[0]]=res[2]
                                 else:
                                     like_temp[:,indicesy,indicesx,:,:,:]=res[1]  
+                                del result
                             except mp.TimeoutError:
                                 time_out=0.1
                                 pool.terminate()
@@ -1467,6 +1475,7 @@ class PyRSM:
                             it+=1 
                         pool.close()
                         pool.join()
+                    
                     like=[]
                     SNR_FMMF=[]
     
@@ -1475,11 +1484,14 @@ class PyRSM:
                         SNR_FMMF.append(like_temp[residuals_cube_.shape[0],:,:,0,0,k])
                     
                     self.like_fin[j][i]=like
+                like=[]
+                like_temp=[]
+                
                 
     def likfcn(self,ann_center,like_cube,estimator,ns):
         
         if type(like_cube) is not np.ndarray:
-            like_cube = np.frombuffer(var_dict['X']).reshape(var_dict['X_shape'])
+            like_cube = shared_array('like_cube', shape=like_cube)
 
         from vip_hci.var import frame_center  
         
@@ -1721,19 +1733,18 @@ class PyRSM:
         else:
             
             if self.ncore!=1:
-                X_shape=like_cube.shape
-                X = RawArray('d', int(np.prod(X_shape)))
-                X_np = np.frombuffer(X).reshape(X_shape)
-                np.copyto(X_np, like_cube)
-                 
+                like_array = mp.Array(typecode_or_type='f', size_or_initializer=int(np.prod(like_cube.shape)))
+                globals()['like_cube'] = like_array
+                ini_like_array = shared_array('like_cube', shape=like_cube.shape)
+                ini_like_array[:] = like_cube
                 #Sometimes the parallel computation get stuck, to avoid that we impose a maximum computation
-                #time of 0.01 x number of frame x number of pixels iin the last annulus x 2 x pi (0.01 second
+                #time of 0.005 x number of frame x number of pixels iin the last annulus x 2 x pi (0.005 second
                 #per treated pixel)
-                time_out=0.01*like_cube.shape[0]*2*self.maxradius*np.pi
+                time_out=0.005*like_cube.shape[0]*2*self.maxradius*np.pi
                 results=[]    
-                pool=Pool(processes=self.ncore, initializer=init_worker, initargs=(X, X_shape))           
+                pool=Pool(processes=self.ncore)           
                 for e in range(self.minradius,self.maxradius+1):
-                    results.append(pool.apply_async(self.likfcn,args=(e,0,estimator,ns)))
+                    results.append(pool.apply_async(self.likfcn,args=(e,like_cube.shape,estimator,ns)))
                 #[result.wait(timeout=time_out) for result in results]
                 
                 it=self.minradius
@@ -1742,7 +1753,8 @@ class PyRSM:
                         res=result.get(timeout=time_out)
                         indicesy,indicesx=get_time_series(self.cube[0],res[1])
                         probmap[:,indicesy,indicesx]=res[0]
-                        
+                        print('Annulus: {}'.format(res[1]))
+                        del result
                     except mp.TimeoutError:
                         time_out=0.1
                         pool.terminate()
@@ -1750,7 +1762,7 @@ class PyRSM:
                         res=self.likfcn(it,like_cube,estimator,ns)
                         indicesy,indicesx=get_time_series(self.cube[0],res[1])
                         probmap[:,indicesy,indicesx]=res[0]
-                       
+                        print('Time out: {}'.format(res[1]))
                     it+=1
                 pool.close()
                 pool.join()
@@ -1768,6 +1780,8 @@ class PyRSM:
             self.probmap= np.sum(probmap, axis=0)
         elif colmode == 'max':
             self.probmap= np.max(probmap, axis=0)
+        like_cube=[]
+        probmap=[]
             
             
     def opti_bound_sel(self): 
@@ -1926,10 +1940,8 @@ class PyRSM:
                             ang_fc=range(int(self.opti_theta[cuben,ann_center]),int(360+self.opti_theta[cuben,ann_center]),int(360))
                             for i in range(len(ang_fc)):
                                 cube_fc = cube_inject_companions(cube_fc, psf_template,
-                                                     self.pa[cuben], flux_mean, self.pxscale,
-                                                     rad_dists=ann_center,
-                                                     theta=ang_fc[i],
-                                                     verbose=False)
+                                                     self.pa[cuben], flux_mean,ann_center, self.pxscale,
+                                                     theta=ang_fc[i],verbose=False)
                                 y = int(ceny) + ann_center * np.sin(np.deg2rad(
                                                                        ang_fc[i]))
                                 x = int(cenx) + ann_center * np.cos(np.deg2rad(
@@ -2210,10 +2222,8 @@ class PyRSM:
         ang_fc=range(int(self.opti_theta[cuben,ann_center]),int(360+self.opti_theta[cuben,ann_center]),int(360//min((len(fluxes)/2),8)))
         for i in range(len(ang_fc)):
             cube_fc = cube_inject_companions(cube_fc, psf_template,
-                                 self.pa[cuben], flux, self.pxscale,
-                                 rad_dists=ann_center,
-                                 theta=ang_fc[i],
-                                 verbose=False)
+                                 self.pa[cuben], flux,ann_center, self.pxscale,
+                                 theta=ang_fc[i],verbose=False)
             y = int(ceny) + ann_center * np.sin(np.deg2rad(
                                                    ang_fc[i]))
             x = int(cenx) + ann_center * np.cos(np.deg2rad(
@@ -2785,7 +2795,7 @@ class PyRSM:
             self.crop_range[self.param[1]]=crop_r
         
         if self.opti_mode=='full-frame': 
-            print(self.model[modn]+' Bayesian optimization done!')  
+            print(self.model[modn]+' PSO optimization done!')  
             
  
         return param_f[optires.index(max(optires))],max(optires), [x_ini, y_ini],flux_f[optires.index(max(optires))]
@@ -3239,10 +3249,8 @@ class PyRSM:
             psf_template = normalize_psf(self.psf[cuben], fwhm=self.fwhm, verbose=False,size=self.psf[cuben].shape[1])
             
             cube_fc= cube_inject_companions(np.zeros_like(self.cube[cuben]), psf_template,
-                                 self.pa[cuben], sel_flux, self.pxscale,
-                                 rad_dists=ann_center,
-                                 theta=sel_theta,
-                                 verbose=False)
+                                 self.pa[cuben], sel_flux,ann_center, self.pxscale,
+                                 theta=sel_theta,verbose=False)
                
             result = self.likelihood(ann_center,cuben,modn,np.zeros_like(self.cube[cuben]),cube_fc,False)
                 
@@ -3566,7 +3574,7 @@ class PyRSM:
                 if self.opti_mode=='full-frame':
                     
                     if self.cube[i].ndim==4:
-                        var_list=[['FR','FM',],['FR','FM']]
+                        var_list=[['FR','FM'],['FR','FM']]
                     else:
                         var_list=[['FR','FM','ST','SM'],['FR','FM']]
                         
@@ -3842,10 +3850,8 @@ class PyRSM:
 
             
             cube_fc= cube_inject_companions(np.zeros_like(self.cube[cuben]), psf_template,
-                                 self.pa[cuben], flux_opti, self.pxscale,
-                                 rad_dists=l,
-                                 theta=opti_theta,
-                                 verbose=False)
+                                 self.pa[cuben], flux_opti,l, self.pxscale,
+                                 theta=opti_theta,verbose=False)
                
             result = self.likelihood(l,cuben,modn,np.zeros_like(self.cube[cuben]),cube_fc,False)
                 
@@ -4431,10 +4437,8 @@ class PyRSM:
             ang_fc=range(int(init_angle),int(360+init_angle),int(360//min((len(fluxes)//2),8)))
             for i in range(len(ang_fc)):
                 cube_fc = cube_inject_companions(cube_fc, psf_template,
-                                     self.pa[cuben], flux[k], self.pxscale,
-                                     rad_dists=ann_center,
-                                     theta=ang_fc[i],
-                                     verbose=False)
+                                     self.pa[cuben], flux[k],ann_center, self.pxscale,
+                                     theta=ang_fc[i],verbose=False)
                 y = int(ceny) + ann_center * np.sin(np.deg2rad(
                                                        ang_fc[i]))
                 x = int(cenx) + ann_center * np.cos(np.deg2rad(
@@ -4585,8 +4589,8 @@ class PyRSM:
         
         for j in range(len(cube)):
     
-            cubefc = cube_inject_companions(cube[j], self.psf[j], self.pa[j], flevel=level*scaling_factor[j], plsc=self.pxscale, 
-                                    rad_dists=a, theta=b/n_fc*360, n_branches=1,verbose=False)
+            cubefc = cube_inject_companions(cube[j], self.psf[j], self.pa[j], level*scaling_factor[j],a, plsc=self.pxscale, 
+                                     theta=b/n_fc*360, n_branches=1,verbose=False)
             self.cube[j]=cubefc
         
         self.opti_map(estimator=estimator,colmode=colmode,threshold=threshold,verbose=False) 
@@ -4964,7 +4968,7 @@ class PyRSM:
            
             while contrast_matrix[k,0]==0:
                 
-                level=level*0.75
+                level=level*0.5
                 
                 res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
             
@@ -4984,11 +4988,11 @@ class PyRSM:
             level=contrast_matrix[k,np.where(contrast_matrix[k,:]>0)[0][-1]]
             
             pos_detect=[] 
-            pos_non_detect=list(np.arange(0,11))
+            pos_non_detect=list(np.arange(0,n_fc))
             
             while contrast_matrix[k,n_fc]==0:
                 
-                level=level*1.25
+                level=level*1.5
                 
                 res=pool_map(self.ncore, self.estimate_probmax_fc,a,iterable(-np.sort(-np.array(pos_non_detect))),level,cube,n_fc,inv_ang,threshold,probmap,scaling_factor,estimator=estimator, colmode=colmode)
             
@@ -5014,7 +5018,7 @@ class PyRSM:
                 detect_bound[1]= -np.sort(-computed)[np.argmax(np.sort((missing[0]-computed))[np.sort((missing[0]-computed))<0])]
                 level_bound[1]=contrast_matrix[k,detect_bound[1]]
                 it=0    
-                while len(pos_detect)!=missing[0]:
+                while len(pos_detect)!=missing[0] and (level_bound[1]-level_bound[0])/level_bound[0]>1e-4:
                     
                     if np.argmin([len(detect_pos_matrix[detect_bound[1]][0]),len(detect_pos_matrix[detect_bound[0]][1])])==0:
                         
@@ -5064,6 +5068,24 @@ class PyRSM:
                     if len(pos_detect)==missing[0]:
     
                         print("Data point "+"{}".format(len(pos_detect)/n_fc)+" found. Still "+"{}".format(len(missing)-i-1)+" data point(s) missing") 
+                
+                if (level_bound[1]-level_bound[0])/level_bound[0]<1e-4:
+                    
+                    res=np.array(res)
+                    if len(pos_detect)>missing[0]:
+                        non_dist=[[x,res[list(res[:,1]).index(x),0]] for x in detect_pos_matrix[detect_bound[1]][0] if x not in detect_pos_matrix[detect_bound[0]][0] ]
+                        for h in range(len(pos_detect)-missing[0]):
+                            detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())] 
+                            pos_non_detect.append(pos_detect.pop(pos_detect.index(non_dist[np.argmin(np.array(non_dist)[:,1])][0])))
+                            contrast_matrix[k,len(pos_detect)]=level
+                            non_dist.pop(np.argmin(np.array(non_dist)[:,1]))
+                    elif len(pos_detect)<missing[0]:
+                        non_dist=[[x,res[list(res[:,1]).index(x),0]] for x in detect_pos_matrix[detect_bound[1]][0] if x not in detect_pos_matrix[detect_bound[0]][0] ]
+                        for h in range(missing[0]-len(pos_detect)):
+                            pos_detect.append(pos_non_detect.pop(pos_non_detect.index(non_dist[np.argmax(np.array(non_dist)[:,1])][0])))
+                            non_dist.pop(np.argmax(np.array(non_dist)[:,1]))
+                            detect_pos_matrix[len(pos_detect)]=[list(pos_detect.copy()),list(pos_non_detect.copy())]  
+                            contrast_matrix[k,len(pos_detect)]=level
                     
                 computed=np.where(contrast_matrix[k,:]>0)[0]
                 missing=np.where(contrast_matrix[k,:]==0)[0]
@@ -5110,8 +5132,8 @@ class PyRSM:
     
         for j in range(len(cube)):
     
-            cubefc = cube_inject_companions(cube[j], self.psf[j],self.pa[j], flevel=-level*scaling_factor[j], plsc=self.pxscale, 
-                                    rad_dists=an_center, theta=expected_theta, n_branches=1,verbose=False)
+            cubefc = cube_inject_companions(cube[j], self.psf[j],self.pa[j], -level*scaling_factor[j],an_center, plsc=self.pxscale, 
+                                    theta=expected_theta, n_branches=1,verbose=False)
             self.cube[j]=cubefc    
 
         self.opti_map(estimator='Forward-Backward',ns=ns,colmode='median',threshold=False,verbose=False) 
@@ -5274,7 +5296,7 @@ class PyRSM:
         self.maxradius=a+round(self.fwhm)
     
         self.opti_map(estimator='Forward-Backward',ns=ns,colmode='median',threshold=False,verbose=False) 
-        #plot_frames(self.final_map)
+        plot_frames(self.final_map)
         indc = disk((expected_pos[0], expected_pos[1]),2*int(self.fwhm)+1)
         centroid_y,centroid_x=np.where(self.final_map == np.amax(self.final_map[indc[0],indc[1]]))
         print("Peak value: "+"cartesian Y {}".format(centroid_y[0])+", X {}".format(centroid_x[0]))
@@ -5310,7 +5332,7 @@ class PyRSM:
                 step=(np.log10(photo_bound[1])-np.log10(photo_bound[0]))/(photo_bound[2]*2)
                 flux_list=np.power(np.repeat(10,photo_bound[2]*2+1),
             np.array(np.arange(np.log10(photo_bound[0]),np.log10(photo_bound[1])+step,step))[:photo_bound[2]*2+1])
-                temp_res = firstguess(cube[i], self.pa[i], self.psf[i], ncomp=20, plsc=self.pxscale,
+                temp_res = firstguess(cube[i], self.pa[i], self.psf[i], ncomp=20,
                                        planets_xy_coord=[(centroid_x,centroid_y)], fwhm=self.fwhm, 
                                       f_range=flux_list*scaling_factor[i], annulus_width=5, aperture_radius=2,
                                            imlib = 'opencv',interpolation= 'lanczos4', simplex=True, 
@@ -5449,21 +5471,29 @@ class PyRSM:
         else:
             print("Confidence interval computation")  
     
-            int95=[1,1,1]
+    
             if ci_esti=='hessian':
                 power_curr_flux=10**(int(np.log10(curr_flux))-1)
                 fun = lambda param: self.estimate_flux_negfc(param,curr_flux/power_curr_flux,expected_pos,cube,ns,loss_func,scaling_factor,'interval',[power_curr_flux,10**(-round(np.log10(max_val)))])   
                 opti_param, hessian = Hessian([curr_flux/power_curr_flux,expected_pos[0],expected_pos[1]],fun,step=0.05)   
                 curr_flux,expected_pos[0],expected_pos[1]=opti_param
                 curr_flux*=power_curr_flux
-                std=np.nan_to_num(np.sqrt(np.diag(np.linalg.inv(hessian))))
-                int95=sc.stats.norm.ppf(0.95)*std
+                try:
+                    std=np.nan_to_num(np.sqrt(np.diag(np.linalg.inv(hessian))))
+                    int95=sc.stats.norm.ppf(0.95)*std
+                except (RuntimeError, ValueError, RuntimeWarning):
+                    std=[0,0,0]
+                    int95=[0,0,0]
             elif ci_esti=='BFGS' or any(int95==0):
                 res=minimize(self.estimate_flux_negfc,x0=[opti_param[0]/10**(int(np.log10(curr_flux))-1),opti_param[1],opti_param[2]], method='L-BFGS-B',bounds=((lower_b_flux/10**(int(np.log10(curr_flux))-1),upper_b_flux/10**(int(np.log10(curr_flux))-1)),(opti_param[1]-0.2,opti_param[1]+0.2),(opti_param[2]-0.2,opti_param[2]+0.2)),args=(curr_flux/10**(int(np.log10(curr_flux))-1),expected_pos,cube,ns,loss_func,scaling_factor,'interval',[10**(int(np.log10(curr_flux))-1),10**(-round(np.log10(max_val)))]),options={'ftol':5e-3,'gtol':5e-4, 'eps': 1e-2, 'maxiter': 10, 'finite_diff_rel_step': [1e-2,1e-2,1e-2]})
-                std=np.nan_to_num(np.sqrt(np.diag(res['hess_inv'].todense())))
-                int95=sc.stats.norm.ppf(0.95)*std
-                curr_flux=res.x[0]*10**(int(np.log10(curr_flux))-1)
-                expected_pos=res.x[1:3]
+                try:
+                    std=np.nan_to_num(np.sqrt(np.diag(res['hess_inv'].todense())))
+                    int95=sc.stats.norm.ppf(0.95)*std
+                    curr_flux=res.x[0]*10**(int(np.log10(curr_flux))-1)
+                    expected_pos=res.x[1:3]
+                except (RuntimeError, ValueError, RuntimeWarning):
+                    std=[0,0,0]
+                    int95=[0,0,0]
     
             err_phot=std[0]*10**(int(np.log10(curr_flux))-1)
             int95[0]*=10**(int(np.log10(curr_flux))-1)
@@ -5488,8 +5518,5 @@ class PyRSM:
             return curr_flux,centroid_y,centroid_x,err_phot,erry,errx,int95[0],int95[1],int95[2],rad_dist,theta
             
 
-
-
-                                               
+ 
         
-

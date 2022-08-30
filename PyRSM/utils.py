@@ -8,17 +8,17 @@ __author__ = 'Carl-Henrik Dahlqvist'
 from scipy.interpolate import Rbf
 import pandas as pd
 import numpy.linalg as la
-from vip_hci.var import get_annulus_segments, frame_center,prepare_matrix,cube_filter_highpass
 import numpy as np
-from vip_hci.preproc import cube_derotate, cube_collapse, check_pa_vector,check_scal_vector
+from vip_hci.var import cube_filter_highpass, get_annulus_segments, frame_center,prepare_matrix
+from vip_hci.preproc import check_pa_vector,check_scal_vector,cube_derotate, cube_collapse
 from vip_hci.preproc.derotation import _find_indices_adi
 from vip_hci.preproc.rescaling import _find_indices_sdi
 import scipy as sp
 from multiprocessing import cpu_count
-from vip_hci.conf.utils_conf import pool_map, iterable
-from vip_hci.pca.svd import get_eigenvectors
-from vip_hci.llsg.llsg import _patch_rlrps
+from vip_hci.psfsub.svd import get_eigenvectors
+from vip_hci.psfsub.llsg import _patch_rlrps
 from vip_hci.preproc import cube_rescaling_wavelengths as scwave
+from vip_hci.config.utils_conf import pool_map, iterable
 from sklearn.decomposition import NMF
 import sklearn.gaussian_process as gp
 from scipy.stats import norm

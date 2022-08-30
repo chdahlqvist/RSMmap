@@ -17,7 +17,7 @@ angle = './SPHERE_51ERI_pa.fits'
 angs = vip.fits.open_fits(angle)
 cube = vip.fits.open_fits(cube)
 psf = vip.fits.open_fits(psf)
-pxscale_irdis = vip.conf.VLT_SPHERE_IRDIS['plsc']
+pxscale_irdis = vip.config.VLT_SPHERE_IRDIS['plsc']
 
 # Measure the FWHM by fitting a 2d Gaussian to the core of the PSF
 
@@ -26,7 +26,7 @@ fwhm = float((fit.fwhm_y+fit.fwhm_x)/2)
 
 # Normalize the PSF flux to one in the FWHM aperture
 
-psfn = vip.metrics.normalize_psf(psf, fwhm, size=19)
+psfn = vip.fm.normalize_psf(psf, fwhm, size=19)
 psf=  vip.preproc.frame_crop(psfn,11)
 scaling_factor=0.84e6
 psf_oa = psf*scaling_factor
@@ -172,7 +172,7 @@ plot_frames(d.final_map)
 """
 # PyRSM planet characterization algorithm
 """
-from vip_hci.metrics import cube_inject_companions
+from vip_hci.fm import cube_inject_companions
 
 # Create PyRSM class object
 
